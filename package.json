@@ -2,7 +2,7 @@
   "name": "opencode-native",
   "displayName": "OpenCode Native",
   "description": "An unofficial, community-built native VS Code sidebar for the OpenCode CLI, with streaming chat, sessions, models, agents, and trusted workspace context.",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "publisher": "amr-elzoghby",
   "repository": {
     "type": "git",
