@@ -57,6 +57,8 @@ if (!webviewEntry) throw new Error("The VSIX does not contain dist/webview.js.")
 const webview = await webviewEntry.async("string")
 match(webview, /activity-summary/)
 match(webview, /review-card/)
+match(webview, /Chat tokens/)
+match(webview, /rollback-dock/)
 match(webview, /\/mcps/)
 match(webview, /\/status/)
 

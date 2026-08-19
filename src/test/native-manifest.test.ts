@@ -10,7 +10,10 @@ describe("Native command wiring", () => {
       configuration?: { properties?: Record<string, { scope?: string }> }
       keybindings: Array<{ command: string; key: string; when?: string }>
       commands: Array<{ command: string }>
-      menus: { "explorer/context"?: Array<{ command: string; when?: string; group?: string }> }
+      menus: {
+        "explorer/context"?: Array<{ command: string; when?: string; group?: string }>
+        "view/title"?: Array<{ command: string; when?: string; group?: string }>
+      }
     }
   }
 
@@ -36,6 +39,27 @@ describe("Native command wiring", () => {
     equal(webview.includes('window.addEventListener("blur", () => vscode.postMessage({ type: "sidebarFocus", focused: false }))'), true)
     equal(sidebar.includes('"opencode.native.sidebarFocused", message.focused'), true)
     deepEqual(manifest.extensionKind, ["workspace"])
+  })
+
+  it("opens the current-chat token total from the view title instead of the composer", () => {
+    deepEqual(manifest.contributes.menus["view/title"], [
+      { command: "opencode.native.history", when: "view == opencode.sidebar", group: "navigation@1" },
+      { command: "opencode.native.refresh", when: "view == opencode.sidebar", group: "navigation@3" },
+      { command: "opencode.native.usage", when: "view == opencode.sidebar", group: "navigation@2" },
+      { command: "opencode.native.newChat", when: "view == opencode.sidebar", group: "navigation@4" },
+    ])
+    equal(manifest.contributes.commands.some((command) => command.command === "opencode.native.usage"), true)
+    const extension = readFileSync(join(root, "src", "extension.ts"), "utf8")
+    const sidebar = readFileSync(join(root, "src", "sidebar.ts"), "utf8")
+    const usage = readFileSync(join(root, "src", "webview-usage.ts"), "utf8")
+    equal(extension.includes('registerCommand("opencode.native.usage", () => sidebar.openUsage())'), true)
+    equal(sidebar.indexOf('id="usage"') < sidebar.indexOf('class="transcript-shell"'), true)
+    equal(sidebar.indexOf('id="usage"') < sidebar.indexOf('<form id="composer">'), true)
+    equal(usage.includes("Total tokens recorded by OpenCode in this conversation."), true)
+    equal(usage.includes('`${formatTokens(session.tokens?.total)} tokens`'), true)
+    equal(usage.includes("Model limit"), false)
+    equal(usage.includes("Current context"), false)
+    equal(usage.includes("formatPercent"), false)
   })
 
   it("keeps OpenCode auth and provider configuration behind the Extension Host SDK", () => {
@@ -263,16 +287,17 @@ describe("Native command wiring", () => {
     equal(transcript.includes("turnUsageSnapshot"), true)
     equal(protocol.includes("sessionUsage: UsageTotals"), true)
     equal(protocol.includes("contextLimit?: number"), true)
-    equal(usage.includes('setAttribute("aria-haspopup", "dialog")'), true)
+    equal(usage.includes('panel.setAttribute("role", "dialog")'), true)
+    equal(usage.includes('setAttribute("aria-label", "Close chat token details")'), true)
     equal(usage.includes('event.key !== "Escape"'), true)
     equal(usage.includes("innerHTML"), false)
     equal(usage.includes("postMessage"), false)
     equal(webview.includes('document.createElement("details")'), true)
     equal(webview.includes('view.prompt.tabIndex = turn.prompt.createdAt === undefined ? -1 : 0'), true)
-    equal(sidebar.includes('id="usage" aria-label="Usage"'), true)
-    equal(sidebar.includes('"context agent usage send"'), true)
-    equal(sidebar.includes('"model model variant variant"'), true)
-    equal(sidebar.includes("grid-template-columns: auto minmax(0, 1fr) auto auto"), true)
+    equal(sidebar.includes('id="usage" aria-label="Chat token details"'), true)
+    equal(sidebar.includes('"context agent send"'), true)
+    equal(sidebar.includes('"model model variant"'), true)
+    equal(sidebar.includes("grid-template-columns: auto minmax(0, 1fr) auto"), true)
   })
 
   it("rejects stale VSIX bundles byte-for-byte", () => {

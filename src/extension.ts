@@ -25,6 +25,7 @@ export function activate(context: ExtensionContext) {
     commands.registerCommand("opencode.native.newChat", () => sidebar.invokeAction("new")),
     commands.registerCommand("opencode.native.refresh", () => sidebar.invokeAction("refresh")),
     commands.registerCommand("opencode.native.history", () => sidebar.invokeAction("sessions")),
+    commands.registerCommand("opencode.native.usage", () => sidebar.openUsage()),
     commands.registerCommand("opencode.native.models", () => sidebar.invokeAction("models")),
     commands.registerCommand("opencode.native.agents", () => sidebar.invokeAction("agents")),
     commands.registerCommand("opencode.native.variants", () => sidebar.invokeAction("variants")),

@@ -9,7 +9,7 @@ import { createQuestions } from "./webview-questions"
 import { createProviderConnect } from "./webview-connect"
 import { createUsage } from "./webview-usage"
 import { createRollbackDock } from "./webview-rollback"
-import { parseActionMessage, parseComposerMessage, parseRollbackResultMessage, parseStateMessage, parseSubmissionMessage, type NativeAction, type ViewState } from "./protocol"
+import { parseActionMessage, parseComposerMessage, parseRollbackResultMessage, parseStateMessage, parseSubmissionMessage, parseUsageMessage, type NativeAction, type ViewState } from "./protocol"
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void }
 
@@ -54,7 +54,7 @@ const model = createPicker(modelRoot, true, (value) => {
   if (selected) vscode.postMessage({ type: "selectModel", ...selected })
 })
 const variant = createPicker(variantRoot, false, (id) => vscode.postMessage({ type: "selectVariant", id: id || undefined }))
-const usage = createUsage(usageRoot)
+const usage = createUsage(usageRoot, () => prompt.focus())
 const transcriptView = createTranscript(transcript, stickyPrompt, (reviewKey, fileKey) => {
   vscode.postMessage({ type: "openReview", reviewKey, fileKey })
 })
@@ -156,6 +156,13 @@ prompt.addEventListener("input", () => {
 window.addEventListener("message", (event) => {
   if (history.apply(event.data)) return
   if (providerConnect.apply(event.data)) return
+  const usageMessage = parseUsageMessage(event.data)
+  if (usageMessage) {
+    announcer.textContent = usage.open()
+      ? "OpenCode context token details opened."
+      : "No OpenCode context token data is available yet."
+    return
+  }
   const action = parseActionMessage(event.data)
   if (action) {
     applyAction(action.action)
@@ -337,7 +344,7 @@ function render(state: ViewState) {
     }]
     : state.messages
   emptyBrand.hidden = messages.length > 0
-  usage.update(messages, state.models, state.providers, state.sessionUsage)
+  usage.update(state.sessionUsage)
   transcriptView.render(messages, state.reviews, state.activities, {
     agents: state.agents,
     providers: state.providers,

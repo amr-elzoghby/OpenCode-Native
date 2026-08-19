@@ -184,6 +184,7 @@ export type ViewState = {
 
 export type StateMessage = { type: "state"; id: number; state: ViewState }
 export type ActionMessage = { type: "action"; action: NativeAction }
+export type UsageMessage = { type: "usage"; action: "open" }
 export type ComposerMessage = { type: "composer"; text: string }
 export type RollbackResultMessage = {
   type: "rollbackResult"
@@ -453,6 +454,12 @@ export function parseActionMessage(value: unknown): ActionMessage | undefined {
   const item = record(value)
   if (!item || item.type !== "action" || !exactKeys(item, ["type", "action"]) || !isNativeAction(item.action)) return
   return { type: "action", action: item.action }
+}
+
+export function parseUsageMessage(value: unknown): UsageMessage | undefined {
+  const item = record(value)
+  if (!item || item.type !== "usage" || item.action !== "open" || !exactKeys(item, ["type", "action"])) return
+  return { type: "usage", action: "open" }
 }
 
 export function parseComposerMessage(value: unknown): ComposerMessage | undefined {

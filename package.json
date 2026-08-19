@@ -2,7 +2,7 @@
   "name": "opencode-native",
   "displayName": "OpenCode Native",
   "description": "An unofficial, community-built native VS Code sidebar for the OpenCode CLI, with streaming chat, sessions, models, agents, and trusted workspace context.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "amr-elzoghby",
   "repository": {
     "type": "git",
@@ -103,6 +103,11 @@
         "icon": "$(history)"
       },
       {
+        "command": "opencode.native.usage",
+        "title": "OpenCode: Chat Tokens",
+        "icon": "$(pie-chart)"
+      },
+      {
         "command": "opencode.native.refresh",
         "title": "OpenCode: Refresh Current Chat",
         "icon": "$(refresh)"
@@ -160,12 +165,17 @@
         {
           "command": "opencode.native.refresh",
           "when": "view == opencode.sidebar",
+          "group": "navigation@3"
+        },
+        {
+          "command": "opencode.native.usage",
+          "when": "view == opencode.sidebar",
           "group": "navigation@2"
         },
         {
           "command": "opencode.native.newChat",
           "when": "view == opencode.sidebar",
-          "group": "navigation@3"
+          "group": "navigation@4"
         }
       ]
     },

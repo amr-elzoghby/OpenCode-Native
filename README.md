@@ -12,7 +12,7 @@ Use OpenCode from a native VS Code sidebar while keeping the OpenCode CLI, provi
 ## Highlights
 
 - Streaming chat with OpenCode models, agents, variants, questions, and tool activity.
-- Current-context and full-session usage, plus expandable model, timing, cost, and token details for each turn.
+- Current-chat token totals, plus expandable timing, cost, and token details for each turn.
 - Searchable session history with rename, delete, refresh, fork, undo/redo, rolled-back message restore, and native diff review.
 - Provider sign-in through `/connect`, including subscription/OAuth and API-key methods exposed by OpenCode.
 - Workspace context plus local text, PDF, image, audio, and video attachments.
@@ -24,9 +24,9 @@ Use OpenCode from a native VS Code sidebar while keeping the OpenCode CLI, provi
   <img src="images/screenshots/slash-commands.png" width="49%" alt="Searchable slash commands in the OpenCode TUI and Native sidebar">
 </p>
 
-## Usage and message history
+## Chat tokens and message history
 
-The context meter beside the model uses usage reported by OpenCode. Hover or focus it for a quick summary, or open it for current-context and full-session token and cost details. A response footer shows the model, agent, timing, and exact turn usage when available. Cost is an OpenCode estimate, not a provider invoice.
+Use the token button beside History to see the total tokens recorded by OpenCode in the current conversation. Response details also show the model, agent, timing, turn tokens, and estimated cost when OpenCode provides them.
 
 After undoing one or more turns, a collapsed **Rolled-back messages** dock appears above the composer. Expand it to restore a specific prompt through OpenCode's official session history—without keeping a second copy of the conversation in the extension.
 

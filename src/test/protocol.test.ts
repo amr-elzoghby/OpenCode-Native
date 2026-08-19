@@ -13,6 +13,7 @@ import {
   parseRollbackResultMessage,
   parseStateMessage,
   parseSubmissionMessage,
+  parseUsageMessage,
   parseWebviewMessage,
   type SubmissionEvent,
 } from "../protocol"
@@ -79,6 +80,8 @@ describe("Webview request protocol", () => {
       type: "action",
       action: "sessions",
     })
+    deepEqual(parseUsageMessage({ type: "usage", action: "open" }), { type: "usage", action: "open" })
+    equal(parseUsageMessage({ type: "usage", action: "open", command: "workbench.action.reloadWindow" }), undefined)
     equal(parseWebviewMessage({ type: "invokeAction", action: "workbench.action.reloadWindow" }), undefined)
   })
 

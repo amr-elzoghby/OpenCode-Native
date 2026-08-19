@@ -24,6 +24,7 @@ import {
   type ProviderConnectMessage,
   type RollbackResultMessage,
   type SubmissionMessage,
+  type UsageMessage,
   type ViewState,
   type WebviewMessage,
 } from "./protocol"
@@ -229,6 +230,11 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       return
     }
     await this.postAction({ type: "action", action })
+  }
+
+  async openUsage() {
+    await commands.executeCommand(`${VIEW_ID}.focus`)
+    return this.view?.webview.postMessage({ type: "usage", action: "open" } satisfies UsageMessage) ?? false
   }
 
   async addExplorerFiles(resources: Uri[]) {
@@ -1374,7 +1380,7 @@ function html(webview: Webview, script: Uri, language: string) {
       .attachment-menu::before { content: "Add context"; display: block; padding: 4px 7px 5px; color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 600; text-transform: uppercase; }
       .attachment-option { width: 100%; display: block; padding: 6px 7px; border: 0; border-radius: 4px; color: var(--vscode-menu-foreground); background: transparent; text-align: start; cursor: pointer; }
       .attachment-option:hover:not(:disabled) { background: var(--vscode-menu-selectionBackground); }
-      .controls { display: grid; grid-template-columns: auto minmax(5ch, max-content) minmax(6ch, 1fr) auto minmax(4ch, max-content) auto; align-items: center; min-width: 0; }
+      .controls { display: grid; grid-template-columns: auto minmax(5ch, max-content) minmax(6ch, 1fr) minmax(4ch, max-content) auto; align-items: center; min-width: 0; }
       .picker { position: relative; min-width: 0; }
       #agent-picker { max-width: 11ch; }
       #agent-picker .picker-label { color: var(--opencode-accent); font-weight: 600; }
@@ -1389,19 +1395,14 @@ function html(webview: Webview, script: Uri, language: string) {
       .picker-chevron { width: 6px; height: 6px; flex: 0 0 auto; margin-top: -3px; border-inline-end: 1px solid var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-descriptionForeground); transform: rotate(45deg); }
       .picker-menu { position: absolute; z-index: 20; inset-inline-start: 0; bottom: 31px; width: min(300px, calc(100vw - 34px)); max-height: min(360px, 55vh); overflow: hidden; padding: 5px; border: 1px solid var(--vscode-widget-border); border-radius: 8px; background: var(--vscode-menu-background); box-shadow: 0 8px 24px var(--vscode-widget-shadow); }
       #model-picker .picker-menu, #variant-picker .picker-menu { inset-inline-start: auto; inset-inline-end: 0; }
-      .usage-control { position: relative; width: 26px; height: 26px; direction: ltr; unicode-bidi: isolate; }
-      .usage-trigger { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--vscode-descriptionForeground); background: transparent; cursor: pointer; }
-      .usage-trigger:hover, .usage-trigger:focus-visible, .usage-trigger[aria-expanded="true"] { color: var(--opencode-accent); background: var(--vscode-toolbar-hoverBackground); }
-      .usage-ring { --usage-progress: 0deg; position: relative; width: 16px; height: 16px; border-radius: 50%; background: conic-gradient(currentColor var(--usage-progress), var(--vscode-widget-border) 0); }
-      .usage-ring::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--vscode-input-background); }
-      .usage-ring[data-over-limit="true"] { color: var(--vscode-errorForeground); }
-      .usage-tooltip { position: absolute; z-index: 31; inset-inline-end: -4px; bottom: 31px; width: 145px; display: none; padding: 7px 9px; border: 1px solid var(--vscode-widget-border); border-radius: 6px; color: var(--vscode-foreground); background: var(--vscode-editorHoverWidget-background); box-shadow: 0 5px 16px var(--vscode-widget-shadow); pointer-events: none; }
-      .usage-tooltip > div { display: grid; gap: 4px; }
-      .usage-tooltip > div > div { display: flex; justify-content: space-between; gap: 12px; }
-      .usage-tooltip span { color: var(--vscode-descriptionForeground); }
-      .usage-control:hover .usage-tooltip, .usage-control:focus-within .usage-tooltip { display: block; }
-      .usage-control:has(.usage-details:not([hidden])) .usage-tooltip { display: none; }
-      .usage-details { position: absolute; z-index: 32; inset-inline-end: -40px; bottom: 32px; width: min(300px, calc(100vw - 34px)); padding: 10px; border: 1px solid var(--opencode-accent-border); border-radius: 8px; color: var(--vscode-foreground); background: var(--vscode-menu-background); box-shadow: 0 8px 24px var(--vscode-widget-shadow); }
+      .usage-control { position: fixed; z-index: 60; inset: 0; width: 0; height: 0; direction: ltr; unicode-bidi: isolate; }
+      .usage-details { position: fixed; z-index: 60; inset-block-start: 8px; inset-inline-end: 8px; width: min(320px, calc(100vw - 16px)); max-height: calc(100vh - 16px); overflow-y: auto; padding: 10px; border: 1px solid var(--opencode-accent-border); border-radius: 8px; color: var(--vscode-foreground); background: var(--vscode-menu-background); box-shadow: 0 8px 24px var(--vscode-widget-shadow); }
+      .usage-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+      .usage-header h2 { margin: 0; font-size: 13px; }
+      .usage-close { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 5px; color: var(--vscode-icon-foreground); background: transparent; cursor: pointer; font-size: 18px; }
+      .usage-close:hover { color: var(--opencode-accent); background: var(--vscode-toolbar-hoverBackground); }
+      .usage-pair { padding: 8px; border: 1px solid var(--vscode-widget-border); border-radius: 6px; color: var(--opencode-accent); background: var(--vscode-editor-background); text-align: center; font: 600 13px/1.4 var(--vscode-editor-font-family); unicode-bidi: isolate; }
+      .usage-note { margin: 8px 1px 10px; color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.45; text-align: start; unicode-bidi: plaintext; }
       .usage-details h3 { margin: 0 0 7px; font-size: 11px; }
       .usage-details h3:not(:first-child) { margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--vscode-widget-border); }
       .picker-search { width: 100%; height: 28px; margin-bottom: 4px; padding: 0 7px; border: 1px solid var(--vscode-input-border); border-radius: 4px; outline: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
@@ -1432,16 +1433,15 @@ function html(webview: Webview, script: Uri, language: string) {
         .rollback-item { grid-template-columns: minmax(0, 1fr); }
         .rollback-restore { justify-self: end; white-space: normal; }
         .controls {
-          grid-template-columns: auto minmax(0, 1fr) auto auto;
+          grid-template-columns: auto minmax(0, 1fr) auto;
           grid-template-areas:
-            "context agent usage send"
-            "model model variant variant";
+            "context agent send"
+            "model model variant";
           row-gap: 2px;
         }
         .attachment-control { grid-area: context; }
         #agent-picker { grid-area: agent; }
         #model-picker { grid-area: model; }
-        .usage-control { grid-area: usage; }
         #variant-picker { grid-area: variant; }
         #send { grid-area: send; }
         #agent-picker, #model-picker, #variant-picker { max-width: none; }
@@ -1460,6 +1460,7 @@ function html(webview: Webview, script: Uri, language: string) {
       <section class="history" id="history" role="dialog" aria-modal="true" aria-label="OpenCode chat history" hidden></section>
       <section id="timeline" role="dialog" aria-modal="true" aria-label="OpenCode chat timeline" hidden></section>
       <section class="provider-connect" id="provider-connect" role="dialog" aria-modal="true" aria-label="Connect an AI provider" hidden></section>
+      <div class="usage-control" id="usage" aria-label="Chat token details" hidden></div>
       <div class="transcript-shell">
         <!-- Canonical simple wordmark geometry from packages/console/app/src/asset/brand. -->
         <div id="empty-brand" aria-hidden="true">
@@ -1482,7 +1483,6 @@ function html(webview: Webview, script: Uri, language: string) {
           <div class="attachment-control"><button id="add-context" type="button" aria-label="Add context" title="Add context" aria-haspopup="menu" aria-expanded="false">+</button><div class="attachment-menu" id="attachment-menu" role="menu" hidden></div></div>
           <div class="picker" id="agent-picker" aria-label="Agent"></div>
           <div class="picker" id="model-picker" aria-label="Model"></div>
-          <div class="usage-control" id="usage" aria-label="Usage" hidden></div>
           <div class="picker" id="variant-picker" aria-label="Variant" hidden></div>
           <button id="send" type="submit" aria-label="Send" title="Send">↑</button>
         </div>
