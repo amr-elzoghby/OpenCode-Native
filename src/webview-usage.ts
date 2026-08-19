@@ -68,7 +68,7 @@ export function createUsage(root: HTMLElement, restoreFocus: () => void) {
       total.textContent = `${formatTokens(session.tokens?.total)} tokens`
       const note = document.createElement("p")
       note.className = "usage-note"
-      note.textContent = "Exact total reported by OpenCode for this chat, including input, output, reasoning, and cache tokens across every model request."
+      note.textContent = "Calculated from OpenCode's input, output, reasoning, cache-read, and cache-write counters for this chat."
       panel.replaceChildren(header, total, note)
     },
   }

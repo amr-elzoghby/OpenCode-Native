@@ -55,7 +55,7 @@ describe("Native command wiring", () => {
     equal(extension.includes('registerCommand("opencode.native.usage", () => sidebar.openUsage())'), true)
     equal(sidebar.indexOf('id="usage"') < sidebar.indexOf('class="transcript-shell"'), true)
     equal(sidebar.indexOf('id="usage"') < sidebar.indexOf('<form id="composer">'), true)
-    equal(usage.includes("Exact total reported by OpenCode for this chat"), true)
+    equal(usage.includes("Calculated from OpenCode's input, output, reasoning, cache-read, and cache-write counters"), true)
     equal(usage.includes('`${formatTokens(session.tokens?.total)} tokens`'), true)
     equal(usage.includes("Model limit"), false)
     equal(usage.includes("Current context"), false)

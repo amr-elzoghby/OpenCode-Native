@@ -12,7 +12,7 @@ Use OpenCode from a native VS Code sidebar while keeping the OpenCode CLI, provi
 ## Highlights
 
 - Streaming chat with OpenCode models, agents, variants, questions, and tool activity.
-- Current-chat token totals, plus expandable timing, cost, and token details for each turn.
+- Current-chat token total, plus expandable model, agent, timing, cost, and per-turn token details.
 - Searchable session history with rename, delete, refresh, fork, undo/redo, rolled-back message restore, and native diff review.
 - Provider sign-in through `/connect`, including subscription/OAuth and API-key methods exposed by OpenCode.
 - Workspace context plus local text, PDF, image, audio, and video attachments.
@@ -26,11 +26,13 @@ Use OpenCode from a native VS Code sidebar while keeping the OpenCode CLI, provi
 
 ## Chat tokens and message history
 
-Use the token button beside History to see the exact total reported by OpenCode for the current conversation, including input, output, reasoning, and cache tokens across every model request. Response details also show the model, agent, timing, turn tokens, and estimated cost when OpenCode provides them.
+Use the **Chat Tokens** button beside History to see one total for the current chat. Native calculates it from the input, output, reasoning, cache-read, and cache-write counters supplied by OpenCode for every model request; it does not estimate tokens locally or show monthly/account usage. Response details also show the model, agent, timing, turn tokens, and cost when OpenCode provides them.
 
-After undoing one or more turns, a collapsed **Rolled-back messages** dock appears above the composer. Expand it to restore a specific prompt through OpenCode's official session history—without keeping a second copy of the conversation in the extension.
+After `/undo`, a collapsed **Rolled-back messages** dock appears above the composer. Expand it to restore a selected turn, its saved response, and the earlier rolled-back history through OpenCode's official revert state—without storing a separate conversation copy in the extension.
 
 ## Install and set up
+
+OpenCode Native ships the VS Code interface only; it does not bundle the CLI. It works with the official OpenCode CLI and does not require a forked Core build or a Native-specific backend patch.
 
 1. Install **OpenCode Native** from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=amr-elzoghby.opencode-native), or search for `OpenCode Native` in the VS Code Extensions view.
 2. Install the [OpenCode CLI](https://opencode.ai) where the VS Code Extension Host runs. In WSL, SSH, or a dev container, install it inside that environment.
@@ -91,7 +93,7 @@ Avoid writing to the same session from both clients at the same time.
 - `/connect` sends credentials from VS Code host inputs to OpenCode Core; the sidebar never receives those secrets.
 - After explicit selection, the Webview reads the device file and sends its basename, MIME hint, and bounded content to the Extension Host; the full local path is not sent. The host revalidates the payload, detects an allowed type, and checks size and model support before submission.
 - Native does not decide which actions require approval. It shows only real pending requests from OpenCode Core and returns **Allow once** or **Deny**. Routine reads, searches, directory inspection, and informational commands remain silent whenever Core allows them; Native has no command-name risk engine.
-- Native Review depends on valid OpenCode snapshot/diff data. Edits can still finish when review data is unavailable.
+- Native Review uses OpenCode's official `session.diff` snapshot data and does not require custom file-change-record APIs. Agent edits can still finish when diff data is unavailable, but Review may be unavailable for that turn.
 - Live cross-client sync and persistent **Always Allow** management are not included in this release.
 
 ## Development
