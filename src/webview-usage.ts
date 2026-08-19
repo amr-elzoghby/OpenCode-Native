@@ -6,7 +6,7 @@ type Model = ViewState["models"][number]
 
 export type ContextUsage = {
   message: Message
-  tokens: UsageTokens
+  tokens?: UsageTokens
   model?: Model
   limit?: number
   percent?: number
@@ -15,18 +15,18 @@ export type ContextUsage = {
 export function deriveContextUsage(messages: Message[], models: Model[]): ContextUsage | undefined {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!
-    const tokens = message.role === "assistant" ? message.response?.contextTokens : undefined
-    if (!tokens || tokens.total <= 0) continue
+    if (message.role !== "assistant" || message.response?.completedAt === undefined) continue
+    const tokens = message.response.contextTokens
     const model = models.find((item) =>
       item.providerID === message.response?.providerID && item.id === message.response?.modelID
     )
     const limit = model?.contextLimit
     return {
       message,
-      tokens,
+      ...(tokens ? { tokens } : {}),
       model,
       limit,
-      ...(limit ? { percent: (tokens.total / limit) * 100 } : {}),
+      ...(tokens && limit ? { percent: (tokens.total / limit) * 100 } : {}),
     }
   }
 }
@@ -101,7 +101,7 @@ export function createUsage(root: HTMLElement) {
       }
       const cost = formatCost(session.cost)
       const percent = formatPercent(context?.percent)
-      const tokens = formatTokens(context?.tokens.total)
+      const tokens = formatTokens(context?.tokens?.total)
       const progress = Math.min(100, Math.max(0, context?.percent ?? 0))
       ring.style.setProperty("--usage-progress", `${progress * 3.6}deg`)
       ring.dataset.overLimit = String((context?.percent ?? 0) > 100)

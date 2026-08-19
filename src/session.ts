@@ -1486,7 +1486,10 @@ export class SessionController {
     const started = performance.now()
     const reconciling = Promise.all([
       this.loadTranscript(attempt, sessionID),
-      this.loadSessionUsage(attempt, sessionID).catch(() => undefined),
+      this.loadSessionUsage(attempt, sessionID).then(
+        (usage) => ({ ok: true as const, usage }),
+        () => ({ ok: false as const }),
+      ),
     ])
       .then(async ([transcript, sessionUsage]) => {
         if (this.submitting) await this.submitting
@@ -1498,7 +1501,7 @@ export class SessionController {
         ) return
         this.reviewEpoch++
         this.transcript = transcript
-        attempt.sessionUsage = sessionUsage
+        if (sessionUsage.ok) attempt.sessionUsage = sessionUsage.usage
         transcript.snapshot().forEach((message) => {
           if (this.submissionTracker.observe(message.id)) this.timing("user message observed by transcript sync")
         })

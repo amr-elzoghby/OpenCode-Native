@@ -430,7 +430,9 @@ export class Transcript {
         }
       })
       .filter((message) => message.text.length > 0 || !!message.attachments?.length ||
-        (message.role === "assistant" && (this.activities.get(message.id)?.items.size || message.id === retryMessageID)))
+        (message.role === "assistant" && (
+          !!message.response || this.activities.get(message.id)?.items.size || message.id === retryMessageID
+        )))
   }
 
   turnUsageSnapshot(): TurnUsage[] {

@@ -1391,8 +1391,20 @@ function html(webview: Webview, script: Uri, language: string) {
       .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
       @media (max-width: 260px) {
         form { margin-inline: 6px; padding-inline: 7px; }
-        .controls { grid-template-columns: auto minmax(5ch, 0.75fr) minmax(6ch, 1fr) auto minmax(4ch, 0.65fr) auto; }
-        #agent-picker, #variant-picker { max-width: none; }
+        .controls {
+          grid-template-columns: auto minmax(0, 1fr) auto auto;
+          grid-template-areas:
+            "context agent usage send"
+            "model model variant variant";
+          row-gap: 2px;
+        }
+        .attachment-control { grid-area: context; }
+        #agent-picker { grid-area: agent; }
+        #model-picker { grid-area: model; }
+        .usage-control { grid-area: usage; }
+        #variant-picker { grid-area: variant; }
+        #send { grid-area: send; }
+        #agent-picker, #model-picker, #variant-picker { max-width: none; }
         .picker-chevron { display: none; }
         .picker-trigger { padding-inline: 4px; }
         #model-picker .picker-trigger, #variant-picker .picker-trigger { padding-inline-start: 9px; }

@@ -327,6 +327,30 @@ describe("streamed transcript", () => {
     })
   })
 
+  it("keeps completed response metadata when an assistant has no text or activity", () => {
+    const transcript = new Transcript()
+    transcript.upsertMessage({ id: "user-empty", role: "user", time: { created: 1 } })
+    transcript.setPart({ id: "user-text", messageID: "user-empty", text: "question" })
+    transcript.upsertMessage({
+      id: "assistant-empty",
+      parentID: "user-empty",
+      role: "assistant",
+      time: { created: 2, completed: 3 },
+      agent: "build",
+      providerID: "provider",
+      modelID: "model",
+      cost: 0,
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    })
+
+    const response = transcript.snapshot()[1]
+    equal(response?.id, "assistant-empty")
+    equal(response?.text, "")
+    equal(response?.response?.completedAt, 3)
+    equal(response?.response?.modelID, "model")
+    equal(response?.response?.contextTokens?.total, 0)
+  })
+
   it("sums unique step-finish records per turn without confusing them with current context", () => {
     const transcript = new Transcript()
     transcript.upsertMessage({ id: "user-usage", role: "user", time: { created: 1 } })

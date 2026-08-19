@@ -3,6 +3,7 @@ import type { Catalog } from "../catalog"
 import { SessionController } from "../session"
 import { SessionHistory, type SessionInfo } from "../session-history"
 import { Transcript } from "../transcript"
+import type { UsageTotals } from "../usage"
 
 describe("lazy session state", () => {
   it("does not create state for repeated empty New Chat actions", () => {
@@ -711,6 +712,50 @@ describe("official usage event projection", () => {
     await internal.attempt!.reconciling
     equal(session.snapshot().sessionUsage.cost, 0.25)
     equal(session.snapshot().sessionUsage.tokens?.total, 157)
+  })
+
+  it("preserves the last authoritative session aggregate when its refresh fails transiently", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.promptBusy = true
+    internal.attempt!.sessionUsage = {
+      cost: 0.2,
+      tokens: { input: 80, output: 10, reasoning: 2, cacheRead: 20, cacheWrite: 1, total: 113 },
+    }
+    internal.flushRender()
+    internal.loadTranscript = async () => transcript("complete")
+    internal.attempt!.client = {
+      session: {
+        get: async () => { throw new Error("temporary connection failure") },
+      },
+    }
+
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.idle", properties: { sessionID: "old" } },
+    } as never)
+    await internal.attempt!.reconciling
+
+    equal(session.snapshot().sessionUsage.cost, 0.2)
+    equal(session.snapshot().sessionUsage.tokens?.total, 113)
+  })
+
+  it("clears a stale aggregate when a successful refresh explicitly has no usage", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.promptBusy = true
+    internal.attempt!.sessionUsage = { cost: 0.2 }
+    internal.flushRender()
+    internal.loadTranscript = async () => transcript("complete")
+    internal.attempt!.client = {
+      session: { get: async () => ({ data: info("old", 2) }) },
+    }
+
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.idle", properties: { sessionID: "old" } },
+    } as never)
+    await internal.attempt!.reconciling
+
+    deepEqual(session.snapshot().sessionUsage, {})
   })
 })
 
@@ -1584,6 +1629,7 @@ type ControllerInternals = {
     pendingEvents?: { sessionID: string; generation: number; events: never[]; overflow: boolean }
     reconciling?: Promise<void>
     revertMessageID?: string
+    sessionUsage?: UsageTotals
     events?: Promise<void>
     eventAbort?: AbortController
   }

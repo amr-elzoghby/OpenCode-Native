@@ -259,6 +259,9 @@ describe("Native command wiring", () => {
     equal(webview.includes('document.createElement("details")'), true)
     equal(webview.includes('view.prompt.tabIndex = turn.prompt.createdAt === undefined ? -1 : 0'), true)
     equal(sidebar.includes('id="usage" aria-label="Usage"'), true)
+    equal(sidebar.includes('"context agent usage send"'), true)
+    equal(sidebar.includes('"model model variant variant"'), true)
+    equal(sidebar.includes("grid-template-columns: auto minmax(0, 1fr) auto auto"), true)
   })
 
   it("rejects stale VSIX bundles byte-for-byte", () => {
