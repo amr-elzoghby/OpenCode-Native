@@ -1,5 +1,5 @@
 import { equal } from "node:assert/strict"
-import { activityLabel, reviewReady } from "../webview-transcript"
+import { activityLabel, formatDuration, formatTimestamp, reviewReady } from "../webview-transcript"
 import type { ViewState } from "../protocol"
 
 type Activity = ViewState["activities"][number]
@@ -33,6 +33,14 @@ describe("activity disclosure presentation", () => {
       activity([item("read", "Read src/a.ts")], { status: "completed" }),
       activity([item("command", "Ran command")], { status: "failed" }),
     ]), true)
+  })
+
+  it("formats only real response timing and preserves unknown as an em dash", () => {
+    equal(formatDuration(999), "999ms")
+    equal(formatDuration(2_500), "3s")
+    equal(formatTimestamp(undefined), "—")
+    equal(formatTimestamp(Number.NaN), "—")
+    equal(formatTimestamp(0) === "—", false)
   })
 })
 

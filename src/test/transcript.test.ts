@@ -291,6 +291,124 @@ describe("streamed transcript", () => {
     equal(transcript.activitySnapshot()[0]!.status, "interrupted")
   })
 
+  it("projects explicit assistant identity, timing, response cost, and latest-context tokens", () => {
+    const transcript = new Transcript()
+    transcript.upsertMessage({ id: "user-usage", role: "user", time: { created: 1_000 } })
+    transcript.setPart({ id: "user-text", messageID: "user-usage", text: "question" })
+    transcript.upsertMessage({
+      id: "assistant-usage",
+      parentID: "user-usage",
+      role: "assistant",
+      time: { created: 2_000, completed: 5_250 },
+      agent: "build",
+      providerID: "openai",
+      modelID: "gpt-safe",
+      variant: "high",
+      cost: 0.0000007,
+      tokens: { input: 100, output: 20, reasoning: 10, cache: { read: 30, write: 5 }, total: 999 },
+    })
+    transcript.setPart({ id: "assistant-text", messageID: "assistant-usage", text: "answer" })
+
+    deepEqual(transcript.snapshot()[1]?.response, {
+      completedAt: 5_250,
+      agent: "build",
+      providerID: "openai",
+      modelID: "gpt-safe",
+      variant: "high",
+      cost: 0.0000007,
+      contextTokens: {
+        input: 100,
+        output: 20,
+        reasoning: 10,
+        cacheRead: 30,
+        cacheWrite: 5,
+        total: 165,
+      },
+    })
+  })
+
+  it("sums unique step-finish records per turn without confusing them with current context", () => {
+    const transcript = new Transcript()
+    transcript.upsertMessage({ id: "user-usage", role: "user", time: { created: 1 } })
+    transcript.setPart({ id: "user-text", messageID: "user-usage", text: "question" })
+    transcript.upsertMessage({
+      id: "assistant-usage",
+      parentID: "user-usage",
+      role: "assistant",
+      time: { created: 2, completed: 5 },
+      agent: "build",
+      providerID: "provider",
+      modelID: "model",
+      cost: 0.03,
+      tokens: { input: 20, output: 2, reasoning: 0, cache: { read: 4, write: 0 } },
+    })
+    transcript.setPart({ id: "answer", messageID: "assistant-usage", text: "done" })
+    transcript.setStepFinish({
+      id: "step-1",
+      messageID: "assistant-usage",
+      type: "step-finish",
+      cost: 0.01,
+      tokens: { input: 4, output: 1, reasoning: 1, cache: { read: 2, write: 0 } },
+    })
+    transcript.setStepFinish({
+      id: "step-2",
+      messageID: "assistant-usage",
+      type: "step-finish",
+      cost: 0.02,
+      tokens: { input: 6, output: 2, reasoning: 0, cache: { read: 3, write: 1 } },
+    })
+    deepEqual(transcript.turnUsageSnapshot(), [{
+      turnID: "user-usage",
+      cost: 0.03,
+      tokens: { input: 10, output: 3, reasoning: 1, cacheRead: 5, cacheWrite: 1, total: 20 },
+    }])
+    equal(transcript.snapshot()[1]?.response?.contextTokens?.total, 26)
+
+    transcript.setStepFinish({
+      id: "step-2",
+      messageID: "assistant-usage",
+      type: "step-finish",
+      cost: 0.025,
+      tokens: { input: 7, output: 2, reasoning: 0, cache: { read: 3, write: 1 } },
+    })
+    equal(transcript.turnUsageSnapshot()[0]?.cost, 0.035)
+    equal(transcript.turnUsageSnapshot()[0]?.tokens?.input, 11)
+    transcript.removePart("assistant-usage", "step-1")
+    equal(transcript.turnUsageSnapshot()[0]?.cost, 0.025)
+    equal(transcript.turnUsageSnapshot()[0]?.tokens?.total, 13)
+  })
+
+  it("rejects malformed response metadata and invalid step replacements without retaining raw fields", () => {
+    const transcript = new Transcript()
+    transcript.upsertMessage({ id: "user-safe", role: "user", time: { created: 10 } })
+    transcript.setPart({ id: "user-text", messageID: "user-safe", text: "question" })
+    transcript.upsertMessage({
+      id: "assistant-safe",
+      parentID: "user-safe",
+      role: "assistant",
+      time: { created: 20, completed: 19 },
+      agent: "build\u202e",
+      providerID: "provider",
+      modelID: "model",
+      cost: Number.POSITIVE_INFINITY,
+      tokens: { input: -1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    })
+    transcript.setPart({ id: "assistant-text", messageID: "assistant-safe", text: "answer" })
+    const response = transcript.snapshot()[1]?.response
+    equal(response?.completedAt, undefined)
+    equal(response?.cost, undefined)
+    equal(response?.contextTokens, undefined)
+    equal(response?.agent?.includes("\u202e"), false)
+    transcript.setStepFinish({
+      id: "bad-step",
+      messageID: "assistant-safe",
+      type: "step-finish",
+      cost: 1,
+      tokens: { input: -1, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    })
+    deepEqual(transcript.turnUsageSnapshot(), [])
+  })
+
   it("retains review metadata without retaining raw SDK message fields or patches", () => {
     const transcript = new Transcript()
     transcript.upsertMessage({

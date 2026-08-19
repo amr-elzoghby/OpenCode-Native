@@ -53,6 +53,25 @@ describe("workspace session history", () => {
     equal(parseSession({ ...session("same", directory, "Chat", 100), revert: { messageID: "user-safe" } })?.revert?.messageID, "user-safe")
   })
 
+  it("projects only authoritative bounded session totals", () => {
+    const parsed = parseSession({
+      ...session("usage", directory, "Usage", 100),
+      cost: 0.0000004,
+      tokens: { input: 10, output: 5, reasoning: 2, cache: { read: 7, write: 1 } },
+      privateMetadata: { secret: "must-not-cross" },
+    })
+    deepEqual(parsed?.usage, {
+      cost: 0.0000004,
+      tokens: { input: 10, output: 5, reasoning: 2, cacheRead: 7, cacheWrite: 1, total: 25 },
+    })
+    equal(JSON.stringify(parsed).includes("must-not-cross"), false)
+    equal(parseSession({
+      ...session("bad", directory, "Bad", 100),
+      cost: -1,
+      tokens: { input: Number.NaN, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    })?.usage, undefined)
+  })
+
   it("accepts safe canonical titles and rejects control or BiDi overrides", () => {
     equal(proposedSessionTitle("  Fix   deployment  "), "Fix deployment")
     equal(proposedSessionTitle("bad\nname"), undefined)

@@ -1,3 +1,5 @@
+import type { ResponseMetadata, TurnUsage, UsageTokens, UsageTotals } from "./usage"
+
 const MAX_PROMPT_LENGTH = 100_000
 const MAX_REQUEST_ID_LENGTH = 128
 const MAX_ATTACHMENTS = 20
@@ -85,7 +87,15 @@ export type AttachmentChip = {
 
 export type ViewState = {
   phase: "idle" | "starting" | "ready" | "loading" | "stopping" | "syncing" | "error"
-  messages: Array<{ id: string; turnID: string; role: "user" | "assistant"; text: string; createdAt?: number; attachments?: string[] }>
+  messages: Array<{
+    id: string
+    turnID: string
+    role: "user" | "assistant"
+    text: string
+    createdAt?: number
+    attachments?: string[]
+    response?: ResponseMetadata
+  }>
   commands: Array<{
     key: string
     name: string
@@ -99,6 +109,7 @@ export type ViewState = {
     id: string
     name: string
     variants: string[]
+    contextLimit?: number
     audio: boolean
     image: boolean
     video: boolean
@@ -156,6 +167,8 @@ export type ViewState = {
       files?: Array<{ key: string; path: string; additions?: number; deletions?: number }>
     }>
   }>
+  turnUsage: TurnUsage[]
+  sessionUsage: UsageTotals
   workspace: boolean
   trusted: boolean
   error?: string
@@ -501,7 +514,7 @@ export function parseStateMessage(value: unknown): StateMessage | undefined {
   if (!item || item.type !== "state" || !Number.isSafeInteger(item.id) || Number(item.id) <= 0) return
   const state = record(item.state)
   if (!state || !validPhase(state) || typeof state.trusted !== "boolean" || typeof state.workspace !== "boolean") return
-  const stateKeys = ["phase", "messages", "commands", "agents", "providers", "models", "selection", "attachments", "reviews", "permissions", "questions", "activities", "workspace", "trusted"]
+  const stateKeys = ["phase", "messages", "commands", "agents", "providers", "models", "selection", "attachments", "reviews", "permissions", "questions", "activities", "turnUsage", "sessionUsage", "workspace", "trusted"]
   if (!(exactKeys(state, stateKeys) || exactKeys(state, [...stateKeys, "error"]))) return
   if (!safeArray(state.messages, isMessage) || (state.messages as unknown[]).length > MAX_TRANSCRIPT_MESSAGES) return
   if ((state.messages as ViewState["messages"]).reduce((total, message) => total + message.text.length, 0) > MAX_TRANSCRIPT_TOTAL_CHARS) return
@@ -525,6 +538,11 @@ export function parseStateMessage(value: unknown): StateMessage | undefined {
     (total, activity) => total + activity.items.reduce((sum, item) => sum + item.title.length + (item.detail?.length ?? 0), 0),
     0,
   ) > MAX_ACTIVITY_TOTAL_CHARS) return
+  if (!safeArray(state.turnUsage, isTurnUsage) || (state.turnUsage as unknown[]).length > MAX_TRANSCRIPT_MESSAGES) return
+  if (!isUsageTotals(state.sessionUsage, true)) return
+  const messageTurns = new Set((state.messages as ViewState["messages"]).map((message) => message.turnID))
+  const usageTurns = (state.turnUsage as ViewState["turnUsage"]).map((usage) => usage.turnID)
+  if (usageTurns.some((turnID) => !messageTurns.has(turnID)) || new Set(usageTurns).size !== usageTurns.length) return
   if (!isSelection(state.selection)) return
   if (!optionalString(state, "error")) return
   return { type: "state", id: Number(item.id), state: state as ViewState }
@@ -553,13 +571,14 @@ function validPhase(value: Record<string, unknown>): value is Record<string, unk
 function isMessage(value: unknown): value is ViewState["messages"][number] {
   const item = record(value)
   const required = ["id", "turnID", "role", "text"]
-  const allowed = [...required, "createdAt", "attachments"]
+  const allowed = [...required, "createdAt", "attachments", "response"]
   return !!item && required.every((key) => Object.prototype.hasOwnProperty.call(item, key)) &&
     Object.keys(item).every((key) => allowed.includes(key)) &&
     safeString(item.id) && safeString(item.turnID) &&
     (item.role === "user" || item.role === "assistant") && safeString(item.text, MAX_TRANSCRIPT_MESSAGE_CHARS) &&
     (item.createdAt === undefined || (Number.isSafeInteger(item.createdAt) && Number(item.createdAt) >= 0 && Number(item.createdAt) <= 8_640_000_000_000_000)) &&
-    (item.attachments === undefined || safeArray(item.attachments, (label) => safeString(label, 240)))
+    (item.attachments === undefined || safeArray(item.attachments, (label) => safeString(label, 240))) &&
+    (item.response === undefined || (item.role === "assistant" && isResponseMetadata(item.response, item.createdAt)))
 }
 
 function isCommand(value: unknown): value is ViewState["commands"][number] {
@@ -599,11 +618,13 @@ function isProviderMethodOption(value: unknown): value is Extract<ProviderConnec
 
 function isModel(value: unknown): value is ViewState["models"][number] {
   const item = record(value)
-  return !!item && exactKeys(item, ["providerID", "id", "name", "variants", "audio", "image", "video", "pdf"]) &&
+  const required = ["providerID", "id", "name", "variants", "audio", "image", "video", "pdf"]
+  return !!item && (exactKeys(item, required) || exactKeys(item, [...required, "contextLimit"])) &&
     safeString(item.providerID) && safeString(item.id) && safeString(item.name, 160) &&
     safeArray(item.variants, (variant) => safeString(variant, 128)) && (item.variants as unknown[]).length <= 100 &&
     typeof item.audio === "boolean" && typeof item.image === "boolean" &&
-    typeof item.video === "boolean" && typeof item.pdf === "boolean"
+    typeof item.video === "boolean" && typeof item.pdf === "boolean" &&
+    (item.contextLimit === undefined || (Number.isSafeInteger(item.contextLimit) && Number(item.contextLimit) > 0))
 }
 
 function isAttachment(value: unknown): value is AttachmentChip {
@@ -723,6 +744,62 @@ function isActivityFile(value: unknown) {
   const item = record(value)
   return !!item && Object.keys(item).every((key) => ["key", "path", "additions", "deletions"].includes(key)) &&
     validOpaqueKey(item.key) && safeString(item.path, 512) && optionalCount(item, "additions") && optionalCount(item, "deletions")
+}
+
+function isResponseMetadata(value: unknown, createdAt: unknown): value is ResponseMetadata {
+  const item = record(value)
+  const allowed = ["completedAt", "agent", "providerID", "modelID", "variant", "cost", "contextTokens"]
+  if (!item || !Object.keys(item).length || !Object.keys(item).every((key) => allowed.includes(key))) return false
+  if (item.completedAt !== undefined && (
+    !validTimestamp(item.completedAt) || (validTimestamp(createdAt) && Number(item.completedAt) < Number(createdAt))
+  )) return false
+  if (!optionalSafeMetadata(item, "agent", 120) || !optionalSafeMetadata(item, "providerID", 512) ||
+    !optionalSafeMetadata(item, "modelID", 512) || !optionalSafeMetadata(item, "variant", 128)) return false
+  if (item.cost !== undefined && !safeUsageCost(item.cost)) return false
+  return item.contextTokens === undefined || isUsageTokens(item.contextTokens)
+}
+
+function isTurnUsage(value: unknown): value is TurnUsage {
+  const item = record(value)
+  if (!item || !safeMetadataString(item.turnID, 512)) return false
+  const keys = Object.keys(item)
+  if (!keys.every((key) => key === "turnID" || key === "cost" || key === "tokens")) return false
+  return keys.some((key) => key === "cost" || key === "tokens") && isUsageTotals(item, false, true)
+}
+
+function isUsageTotals(value: unknown, allowEmpty: boolean, allowTurnID = false): value is UsageTotals {
+  const item = record(value)
+  if (!item) return false
+  const keys = Object.keys(item).filter((key) => !allowTurnID || key !== "turnID")
+  if (!keys.every((key) => key === "cost" || key === "tokens") || (!allowEmpty && !keys.length)) return false
+  if ("cost" in item && !safeUsageCost(item.cost)) return false
+  return !("tokens" in item) || isUsageTokens(item.tokens)
+}
+
+function isUsageTokens(value: unknown): value is UsageTokens {
+  const item = record(value)
+  if (!item || !exactKeys(item, ["input", "output", "reasoning", "cacheRead", "cacheWrite", "total"])) return false
+  const values = [item.input, item.output, item.reasoning, item.cacheRead, item.cacheWrite]
+  if (!values.every((entry) => Number.isSafeInteger(entry) && Number(entry) >= 0)) return false
+  const total = values.map(Number).reduce((sum, entry) => sum + entry, 0)
+  return Number.isSafeInteger(total) && item.total === total
+}
+
+function safeUsageCost(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1_000_000_000
+}
+
+function validTimestamp(value: unknown) {
+  return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 8_640_000_000_000_000
+}
+
+function optionalSafeMetadata(value: Record<string, unknown>, key: string, maximum: number) {
+  return !(key in value) || value[key] === undefined || safeMetadataString(value[key], maximum)
+}
+
+function safeMetadataString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum &&
+    !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
 }
 
 function optionalCount(value: Record<string, unknown>, key: string) {

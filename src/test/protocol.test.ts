@@ -229,6 +229,8 @@ describe("Webview request protocol", () => {
           detail: "bun test",
         }],
       }],
+      turnUsage: [],
+      sessionUsage: {},
       workspace: true,
       trusted: true,
     }
@@ -305,12 +307,90 @@ describe("Webview request protocol", () => {
         permissions: [],
         questions: [],
         activities: [],
+        turnUsage: [],
+        sessionUsage: {},
         workspace: true,
         trusted: true,
       },
     })
     equal(message?.state.selection.model?.modelID, "gpt-safe")
     equal(message?.state.messages[0]?.turnID, "message-1")
+  })
+
+  it("accepts only explicit bounded response, turn, session, and context-limit fields", () => {
+    const tokens = { input: 10, output: 4, reasoning: 2, cacheRead: 3, cacheWrite: 1, total: 20 }
+    const state = {
+      phase: "ready",
+      messages: [
+        { id: "user-usage", turnID: "user-usage", role: "user", text: "مرحبا", createdAt: 1_000 },
+        {
+          id: "assistant-usage",
+          turnID: "user-usage",
+          role: "assistant",
+          text: "hello",
+          createdAt: 2_000,
+          response: {
+            completedAt: 3_000,
+            agent: "build",
+            providerID: "openai",
+            modelID: "gpt-safe",
+            variant: "high",
+            cost: 0.0000001,
+            contextTokens: tokens,
+          },
+        },
+      ],
+      commands: [],
+      agents: [{ id: "build", name: "Build" }],
+      providers: [{ id: "openai", name: "OpenAI" }],
+      models: [{
+        providerID: "openai", id: "gpt-safe", name: "GPT Safe", variants: ["high"], contextLimit: 128_000,
+        audio: false, image: false, video: false, pdf: false,
+      }],
+      selection: { agent: "build", model: { providerID: "openai", modelID: "gpt-safe" }, variant: "high" },
+      attachments: [],
+      reviews: [],
+      permissions: [],
+      questions: [],
+      activities: [],
+      turnUsage: [{ turnID: "user-usage", cost: 0.0000001, tokens }],
+      sessionUsage: { cost: 0.0000001, tokens },
+      workspace: true,
+      trusted: true,
+    }
+    const accepted = parseStateMessage({ type: "state", id: 6, state })
+    equal(accepted?.state.messages[1]?.response?.modelID, "gpt-safe")
+    equal(accepted?.state.turnUsage[0]?.tokens?.total, 20)
+    equal(accepted?.state.models[0]?.contextLimit, 128_000)
+
+    const assistant = state.messages[1]!
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, messages: [state.messages[0], { ...assistant, response: { ...assistant.response, raw: "secret" } }] },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, messages: [{ ...state.messages[0], response: assistant.response }, assistant] },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, messages: [state.messages[0], { ...assistant, response: { ...assistant.response, completedAt: 1_999 } }] },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, messages: [state.messages[0], { ...assistant, response: { ...assistant.response, agent: "build\u202e" } }] },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, sessionUsage: { cost: Number.POSITIVE_INFINITY, tokens } },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, sessionUsage: { tokens: { ...tokens, total: 21 } } },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, turnUsage: [{ ...state.turnUsage[0] }, { ...state.turnUsage[0] }] },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, turnUsage: [{ ...state.turnUsage[0], turnID: "hidden-turn" }] },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state", id: 6, state: { ...state, models: [{ ...state.models[0], contextLimit: 0 }] },
+    }), undefined)
   })
 
   it("rejects transcript messages without a validated turn identity", () => {
@@ -330,6 +410,8 @@ describe("Webview request protocol", () => {
         permissions: [],
         questions: [],
         activities: [],
+        turnUsage: [],
+        sessionUsage: {},
         trusted: true,
       },
     }), undefined)
@@ -352,6 +434,8 @@ describe("Webview request protocol", () => {
         permissions: [],
         questions: [],
         activities: [],
+        turnUsage: [],
+        sessionUsage: {},
         workspace: true,
         trusted: true,
       },
@@ -404,6 +488,8 @@ describe("Webview request protocol", () => {
       permissions: [],
       questions: [],
       activities: [],
+      turnUsage: [],
+      sessionUsage: {},
       workspace: true,
       trusted: true,
     }
@@ -457,6 +543,8 @@ describe("Webview request protocol", () => {
       permissions: [],
       questions: [],
       activities: [],
+      turnUsage: [],
+      sessionUsage: {},
       workspace: true,
       trusted: true,
     }

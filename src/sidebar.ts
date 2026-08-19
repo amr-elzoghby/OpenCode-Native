@@ -497,6 +497,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         id: model.id,
         name: model.name,
         variants: model.variants,
+        ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
         audio: model.audio === true,
         image: model.image,
         video: model.video === true,
@@ -511,6 +512,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       permissions: snapshot.permissions,
       questions: snapshot.questions,
       activities: snapshot.activities,
+      turnUsage: snapshot.turnUsage,
+      sessionUsage: snapshot.sessionUsage,
     } satisfies ViewState
     return view.webview.postMessage({
       type: "state",
@@ -1202,11 +1205,25 @@ function html(webview: Webview, script: Uri, language: string) {
       .context { direction: ltr; unicode-bidi: isolate; font-family: var(--vscode-editor-font-family); }
       .turn { margin: 0 0 20px; overflow-wrap: anywhere; }
       .turn-prompt { margin: 0; padding: 7px 9px; border: 1px solid var(--vscode-chat-requestBorder, transparent); border-inline-start: 2px solid var(--opencode-accent); border-radius: 7px; background: var(--vscode-chat-requestBackground, var(--vscode-input-background)); line-height: 1.5; white-space: pre-wrap; unicode-bidi: plaintext; }
+      .turn-prompt:focus-visible { outline: 1px solid var(--opencode-accent); outline-offset: 1px; }
       .turn-attachments { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 5px; }
       .turn-attachments span { max-width: 100%; overflow: hidden; padding: 1px 6px; border: 1px solid var(--opencode-accent-border); border-radius: 9px; color: var(--vscode-descriptionForeground); background: var(--vscode-editor-background); font: 10px/1.5 var(--vscode-editor-font-family); text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate; }
       .turn-response { padding: 10px 3px 0; }
       .message-time { display: none; margin-top: 5px; color: var(--vscode-descriptionForeground); font-size: 10px; direction: ltr; unicode-bidi: isolate; }
-      .transcript.show-timestamps .message-time { display: block; }
+      .transcript.show-timestamps .message-time, .turn-prompt:hover .message-time, .turn-prompt:focus-visible .message-time { display: block; }
+      .turn-metadata { margin: 10px 0 3px; color: var(--vscode-descriptionForeground); font-size: 10px; direction: ltr; unicode-bidi: isolate; }
+      .turn-metadata-summary { min-height: 24px; display: flex; align-items: center; gap: 5px; width: max-content; max-width: 100%; cursor: pointer; list-style: none; }
+      .turn-metadata-summary::-webkit-details-marker { display: none; }
+      .turn-metadata-summary::before { content: "›"; flex: none; transition: transform 80ms ease-out; }
+      .turn-metadata[open] .turn-metadata-summary::before { transform: rotate(90deg); }
+      .turn-metadata-summary:hover, .turn-metadata-summary:focus-visible { color: var(--vscode-foreground); }
+      .turn-metadata-summary bdi { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .metadata-separator { flex: none; color: var(--vscode-disabledForeground); }
+      .turn-metadata-region { width: min(320px, 100%); margin-top: 3px; padding: 8px 9px; border: 1px solid var(--vscode-widget-border); border-radius: 7px; background: var(--vscode-editorWidget-background); }
+      .turn-metadata-region dl, .usage-details dl { display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(0, 1fr); gap: 4px 12px; margin: 0; }
+      .turn-metadata-region dt, .usage-details dt { color: var(--vscode-descriptionForeground); }
+      .turn-metadata-region dd, .usage-details dd { min-width: 0; margin: 0; color: var(--vscode-foreground); text-align: end; }
+      .turn-metadata-region dd bdi, .usage-details dd bdi { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .review-card { margin: 14px 0 4px; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-radius: 10px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 72%, transparent); }
       .review-card > header { min-height: 67px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--vscode-widget-border); }
       .review-identity { min-width: 0; display: flex; align-items: center; gap: 11px; }
@@ -1320,7 +1337,7 @@ function html(webview: Webview, script: Uri, language: string) {
       .attachment-menu::before { content: "Add context"; display: block; padding: 4px 7px 5px; color: var(--vscode-descriptionForeground); font-size: 10px; font-weight: 600; text-transform: uppercase; }
       .attachment-option { width: 100%; display: block; padding: 6px 7px; border: 0; border-radius: 4px; color: var(--vscode-menu-foreground); background: transparent; text-align: start; cursor: pointer; }
       .attachment-option:hover:not(:disabled) { background: var(--vscode-menu-selectionBackground); }
-      .controls { display: grid; grid-template-columns: auto minmax(5ch, max-content) minmax(6ch, 1fr) minmax(4ch, max-content) auto; align-items: center; min-width: 0; }
+      .controls { display: grid; grid-template-columns: auto minmax(5ch, max-content) minmax(6ch, 1fr) auto minmax(4ch, max-content) auto; align-items: center; min-width: 0; }
       .picker { position: relative; min-width: 0; }
       #agent-picker { max-width: 11ch; }
       #agent-picker .picker-label { color: var(--opencode-accent); font-weight: 600; }
@@ -1335,6 +1352,21 @@ function html(webview: Webview, script: Uri, language: string) {
       .picker-chevron { width: 6px; height: 6px; flex: 0 0 auto; margin-top: -3px; border-inline-end: 1px solid var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-descriptionForeground); transform: rotate(45deg); }
       .picker-menu { position: absolute; z-index: 20; inset-inline-start: 0; bottom: 31px; width: min(300px, calc(100vw - 34px)); max-height: min(360px, 55vh); overflow: hidden; padding: 5px; border: 1px solid var(--vscode-widget-border); border-radius: 8px; background: var(--vscode-menu-background); box-shadow: 0 8px 24px var(--vscode-widget-shadow); }
       #model-picker .picker-menu, #variant-picker .picker-menu { inset-inline-start: auto; inset-inline-end: 0; }
+      .usage-control { position: relative; width: 26px; height: 26px; direction: ltr; unicode-bidi: isolate; }
+      .usage-trigger { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 5px; color: var(--vscode-descriptionForeground); background: transparent; cursor: pointer; }
+      .usage-trigger:hover, .usage-trigger:focus-visible, .usage-trigger[aria-expanded="true"] { color: var(--opencode-accent); background: var(--vscode-toolbar-hoverBackground); }
+      .usage-ring { --usage-progress: 0deg; position: relative; width: 16px; height: 16px; border-radius: 50%; background: conic-gradient(currentColor var(--usage-progress), var(--vscode-widget-border) 0); }
+      .usage-ring::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: var(--vscode-input-background); }
+      .usage-ring[data-over-limit="true"] { color: var(--vscode-errorForeground); }
+      .usage-tooltip { position: absolute; z-index: 31; inset-inline-end: -4px; bottom: 31px; width: 145px; display: none; padding: 7px 9px; border: 1px solid var(--vscode-widget-border); border-radius: 6px; color: var(--vscode-foreground); background: var(--vscode-editorHoverWidget-background); box-shadow: 0 5px 16px var(--vscode-widget-shadow); pointer-events: none; }
+      .usage-tooltip > div { display: grid; gap: 4px; }
+      .usage-tooltip > div > div { display: flex; justify-content: space-between; gap: 12px; }
+      .usage-tooltip span { color: var(--vscode-descriptionForeground); }
+      .usage-control:hover .usage-tooltip, .usage-control:focus-within .usage-tooltip { display: block; }
+      .usage-control:has(.usage-details:not([hidden])) .usage-tooltip { display: none; }
+      .usage-details { position: absolute; z-index: 32; inset-inline-end: -40px; bottom: 32px; width: min(300px, calc(100vw - 34px)); padding: 10px; border: 1px solid var(--opencode-accent-border); border-radius: 8px; color: var(--vscode-foreground); background: var(--vscode-menu-background); box-shadow: 0 8px 24px var(--vscode-widget-shadow); }
+      .usage-details h3 { margin: 0 0 7px; font-size: 11px; }
+      .usage-details h3:not(:first-child) { margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--vscode-widget-border); }
       .picker-search { width: 100%; height: 28px; margin-bottom: 4px; padding: 0 7px; border: 1px solid var(--vscode-input-border); border-radius: 4px; outline: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
       .picker-search:focus { border-color: var(--opencode-accent); }
       .picker-list { max-height: min(310px, 48vh); overflow-y: auto; }
@@ -1359,7 +1391,7 @@ function html(webview: Webview, script: Uri, language: string) {
       .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
       @media (max-width: 260px) {
         form { margin-inline: 6px; padding-inline: 7px; }
-        .controls { grid-template-columns: auto minmax(5ch, 0.75fr) minmax(6ch, 1fr) minmax(4ch, 0.65fr) auto; }
+        .controls { grid-template-columns: auto minmax(5ch, 0.75fr) minmax(6ch, 1fr) auto minmax(4ch, 0.65fr) auto; }
         #agent-picker, #variant-picker { max-width: none; }
         .picker-chevron { display: none; }
         .picker-trigger { padding-inline: 4px; }
@@ -1397,6 +1429,7 @@ function html(webview: Webview, script: Uri, language: string) {
           <div class="attachment-control"><button id="add-context" type="button" aria-label="Add context" title="Add context" aria-haspopup="menu" aria-expanded="false">+</button><div class="attachment-menu" id="attachment-menu" role="menu" hidden></div></div>
           <div class="picker" id="agent-picker" aria-label="Agent"></div>
           <div class="picker" id="model-picker" aria-label="Model"></div>
+          <div class="usage-control" id="usage" aria-label="Usage" hidden></div>
           <div class="picker" id="variant-picker" aria-label="Variant" hidden></div>
           <button id="send" type="submit" aria-label="Send" title="Send">↑</button>
         </div>

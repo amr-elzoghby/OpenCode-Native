@@ -7,6 +7,7 @@ import { createAttachments } from "./webview-attachments"
 import { createPermissions } from "./webview-permissions"
 import { createQuestions } from "./webview-questions"
 import { createProviderConnect } from "./webview-connect"
+import { createUsage } from "./webview-usage"
 import { parseActionMessage, parseComposerMessage, parseStateMessage, parseSubmissionMessage, type NativeAction, type ViewState } from "./protocol"
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void }
@@ -32,6 +33,7 @@ const announcer = required<HTMLElement>("#announcer")
 const send = required<HTMLButtonElement>("#send")
 const agentRoot = required<HTMLElement>("#agent-picker")
 const modelRoot = required<HTMLElement>("#model-picker")
+const usageRoot = required<HTMLElement>("#usage")
 const variantRoot = required<HTMLElement>("#variant-picker")
 let current: ViewState | undefined
 let previousPhase: ViewState["phase"] | undefined
@@ -50,6 +52,7 @@ const model = createPicker(modelRoot, true, (value) => {
   if (selected) vscode.postMessage({ type: "selectModel", ...selected })
 })
 const variant = createPicker(variantRoot, false, (id) => vscode.postMessage({ type: "selectVariant", id: id || undefined }))
+const usage = createUsage(usageRoot)
 const transcriptView = createTranscript(transcript, stickyPrompt, (reviewKey, fileKey) => {
   vscode.postMessage({ type: "openReview", reviewKey, fileKey })
 })
@@ -320,7 +323,13 @@ function render(state: ViewState) {
     }]
     : state.messages
   emptyBrand.hidden = messages.length > 0
-  transcriptView.render(messages, state.reviews, state.activities)
+  usage.update(messages, state.models, state.providers, state.sessionUsage)
+  transcriptView.render(messages, state.reviews, state.activities, {
+    agents: state.agents,
+    providers: state.providers,
+    models: state.models,
+    turnUsage: state.turnUsage,
+  })
 }
 
 function cycleAgent(offset: number) {

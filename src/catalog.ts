@@ -15,6 +15,7 @@ export type ModelOption = {
   id: string
   name: string
   variants: string[]
+  contextLimit?: number
   audio?: boolean
   image: boolean
   video?: boolean
@@ -85,6 +86,8 @@ export function projectCatalog(providerValue: unknown, agentValue: unknown): Cat
       const capabilities = record(model.capabilities)
       const input = record(capabilities?.input)
       const cost = record(model.cost)
+      const limit = record(model.limit)
+      const contextLimit = safeContextLimit(limit?.context)
       modelCandidates.push({
         providerID: selectedProvider.id,
         id,
@@ -95,6 +98,7 @@ export function projectCatalog(providerValue: unknown, agentValue: unknown): Cat
           .filter(([variant, value]) => safeID(variant, 128) && record(value)?.disabled !== true)
           .map(([variant]) => variant)
           .slice(0, 100),
+        ...(contextLimit === undefined ? {} : { contextLimit }),
         audio: input?.audio === true,
         image: input?.image === true,
         video: input?.video === true,
@@ -116,6 +120,7 @@ export function projectCatalog(providerValue: unknown, agentValue: unknown): Cat
       id: model.id,
       name: model.name,
       variants: model.variants,
+      ...(model.contextLimit === undefined ? {} : { contextLimit: model.contextLimit }),
       audio: model.audio,
       image: model.image,
       video: model.video,
@@ -247,4 +252,8 @@ function safeDisplay(value: string, maximum: number) {
 
 function safeReleaseDate(value: unknown) {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : ""
+}
+
+function safeContextLimit(value: unknown) {
+  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : undefined
 }

@@ -37,6 +37,7 @@ import {
   type ProviderMethod,
 } from "./provider-connection"
 import { mcpSummaries, systemStatusItems, type McpSummary, type SystemStatusItem } from "./system-status"
+import type { TurnUsage, UsageTotals } from "./usage"
 
 type Sdk = typeof import("@opencode-ai/sdk/v2/client", { with: { "resolution-mode": "import" } })
 type GlobalEvent = import("@opencode-ai/sdk/v2/client", { with: { "resolution-mode": "import" } }).GlobalEvent
@@ -73,6 +74,8 @@ export type SessionState = {
   permissions: PermissionPrompt[]
   questions: QuestionPrompt[]
   activities: TurnActivity[]
+  turnUsage: TurnUsage[]
+  sessionUsage: UsageTotals
   agents: AgentOption[]
   providers: ProviderOption[]
   models: ModelOption[]
@@ -99,6 +102,7 @@ type Attempt = {
   reconciliationError?: string
   reviewMessageID?: string
   revertMessageID?: string
+  sessionUsage?: UsageTotals
 }
 
 const REVIEW_DIFF_ATTEMPTS = 4
@@ -119,6 +123,8 @@ export class SessionController {
     permissions: [],
     questions: [],
     activities: [],
+    turnUsage: [],
+    sessionUsage: {},
     agents: [],
     providers: [],
     models: [],
@@ -653,6 +659,7 @@ export class SessionController {
       this.submissionTracker.clear()
       this.transcript = hydrated.transcript
       attempt.revertMessageID = hydrated.session.revert?.messageID
+      attempt.sessionUsage = hydrated.session.usage
       this.permissions.clear()
       this.questions.clear()
       this.state = {
@@ -731,6 +738,7 @@ export class SessionController {
     if (attempt) {
       attempt.sessionID = undefined
       attempt.revertMessageID = undefined
+      attempt.sessionUsage = undefined
       attempt.reconciliationError = undefined
       attempt.reviewMessageID = undefined
     }
@@ -838,6 +846,9 @@ export class SessionController {
         const selection = resolveSelection(attempt.catalog!, selectionForSession(hydrated.session, this.state.selection))
         attempt.sessionID = target.id
         attempt.revertMessageID = hydrated.session.revert?.messageID
+        attempt.sessionUsage = sessionUsageAfterEvents(
+          attempt.pendingEvents?.events ?? [], target.id, hydrated.session.usage,
+        )
         attempt.reviewMessageID = undefined
         this.submissionTracker.clear()
         this.transcript = hydrated.transcript
@@ -901,6 +912,9 @@ export class SessionController {
         this.commands.replace(availableCommands.data)
         this.transcript = hydrated.transcript
         attempt.revertMessageID = hydrated.session.revert?.messageID
+        attempt.sessionUsage = sessionUsageAfterEvents(
+          attempt.pendingEvents?.events ?? [], sessionID, hydrated.session.usage,
+        )
         this.permissions.clear()
         this.questions.clear()
         this.state = {
@@ -1252,9 +1266,11 @@ export class SessionController {
       },
       { signal: attempt.abort.signal },
     )
-    if (!created.data) throw new Error("OpenCode did not create a session.")
-    attempt.sessionID = created.data.id
+    const session = parseSession(created.data)
+    if (!session) throw new Error("OpenCode did not create a session.")
+    attempt.sessionID = session.id
     attempt.revertMessageID = undefined
+    attempt.sessionUsage = session.usage
     attempt.reviewMessageID = undefined
     this.timing(`session created in ${duration(started)}`)
     this.transcript = new Transcript(attempt.directory)
@@ -1295,6 +1311,8 @@ export class SessionController {
       attempt.history ??= new SessionHistory(attempt.directory)
       if (!session || session.id !== attempt.sessionID || !attempt.history.accepts(session)) return
       attempt.revertMessageID = session.revert?.messageID
+      attempt.sessionUsage = session.usage
+      this.renderSoon()
       return
     }
     if (payload.type === "message.updated") {
@@ -1309,6 +1327,7 @@ export class SessionController {
       if (part.type === "file") this.transcript.setFile(part)
       if (part.type === "tool") this.transcript.setTool(part)
       if (part.type === "reasoning") this.transcript.setReasoning(part)
+      if (part.type === "step-finish") this.transcript.setStepFinish(part)
       if (part.type === "text" && !part.synthetic && !part.ignored) {
         this.transcript.setPart(part)
         this.recordFirstText(part.messageID)
@@ -1428,6 +1447,20 @@ export class SessionController {
     return transcript
   }
 
+  private async loadSessionUsage(attempt: Attempt, sessionID: string) {
+    if (!attempt.client) throw new Error("OpenCode session is unavailable.")
+    const response = await attempt.client.session.get(
+      { sessionID, directory: attempt.directory },
+      { signal: attempt.abort.signal },
+    )
+    const session = parseSession(response.data)
+    attempt.history ??= new SessionHistory(attempt.directory)
+    if (!session || session.id !== sessionID || !attempt.history.accepts(session)) {
+      throw new Error("That OpenCode chat is outside this workspace.")
+    }
+    return session.usage
+  }
+
   private async loadStableSession(attempt: Attempt, sessionID: string, retry = true): Promise<HydratedSession> {
     if (!attempt.client) throw new Error("OpenCode session is unavailable.")
     attempt.history ??= new SessionHistory(attempt.directory)
@@ -1480,8 +1513,11 @@ export class SessionController {
     if (!sessionID) return Promise.resolve()
     const generation = this.generation
     const started = performance.now()
-    const reconciling = this.loadTranscript(attempt, sessionID)
-      .then(async (transcript) => {
+    const reconciling = Promise.all([
+      this.loadTranscript(attempt, sessionID),
+      this.loadSessionUsage(attempt, sessionID).catch(() => undefined),
+    ])
+      .then(async ([transcript, sessionUsage]) => {
         if (this.submitting) await this.submitting
         if (
           this.attempt !== attempt ||
@@ -1490,6 +1526,7 @@ export class SessionController {
           this.generation !== generation
         ) return
         this.transcript = transcript
+        attempt.sessionUsage = sessionUsage
         transcript.snapshot().forEach((message) => {
           if (this.submissionTracker.observe(message.id)) this.timing("user message observed by transcript sync")
         })
@@ -1704,6 +1741,8 @@ export class SessionController {
       permissions: this.permissions.snapshot(),
       questions: this.questions.snapshot(),
       activities: this.transcript.activitySnapshot(),
+      turnUsage: this.transcript.turnUsageSnapshot(),
+      sessionUsage: this.attempt?.sessionUsage ?? {},
     })
   }
 
@@ -1799,6 +1838,7 @@ export class SessionController {
     if (this.attempt !== attempt) return
     attempt.sessionID = undefined
     attempt.revertMessageID = undefined
+    attempt.sessionUsage = undefined
     attempt.reviewMessageID = undefined
     this.generation++
     this.promptBusy = false
@@ -1818,6 +1858,7 @@ export class SessionController {
     }
     this.transcript = hydrated.transcript
     attempt.revertMessageID = hydrated.session.revert?.messageID
+    attempt.sessionUsage = hydrated.session.usage
     this.permissions.clear()
     this.questions.clear()
     this.flushRender()
@@ -1940,6 +1981,7 @@ function projectMessages(messages: Array<{ info: Message; parts: Part[] }> | und
     info: message.info,
     parts: message.parts.slice(0, 1_000).filter((part) =>
       part.type === "file" || part.type === "tool" || part.type === "reasoning" ||
+      part.type === "step-finish" ||
       (part.type === "text" && !part.synthetic && !part.ignored),
     ),
   }))
@@ -1974,7 +2016,8 @@ function eventTooLarge(event: GlobalEvent) {
   if (event.payload.type === "message.part.updated" && event.payload.properties.part.type === "text") {
     return event.payload.properties.part.text.length > MAX_TRANSCRIPT_MESSAGE_CHARS
   }
-  if (event.payload.type === "message.part.updated" && event.payload.properties.part.type === "tool") {
+  if (event.payload.type === "message.part.updated" &&
+    (event.payload.properties.part.type === "tool" || event.payload.properties.part.type === "step-finish")) {
     return JSON.stringify(event.payload.properties.part).length > 64_000
   }
   return false
@@ -1999,6 +2042,7 @@ function replayEvents(transcript: Transcript, events: GlobalEvent[], sessionID: 
       if (part.type === "file") transcript.setFile(part)
       if (part.type === "tool") transcript.setTool(part)
       if (part.type === "reasoning") transcript.setReasoning(part)
+      if (part.type === "step-finish") transcript.setStepFinish(part)
       return
     }
     if (payload.type === "message.part.delta" && payload.properties.field === "text") {
@@ -2031,6 +2075,14 @@ function sessionInvalidated(events: GlobalEvent[], sessionID: string) {
     eventAffectsSession(event, sessionID) &&
     (event.payload.type === "session.deleted" || event.payload.type === "session.error"),
   )
+}
+
+function sessionUsageAfterEvents(events: GlobalEvent[], sessionID: string, fallback?: UsageTotals) {
+  return events.reduce<UsageTotals | undefined>((usage, event) => {
+    if (event.payload.type !== "session.updated") return usage
+    const session = parseSession(event.payload.properties.info)
+    return session?.id === sessionID ? session.usage : usage
+  }, fallback)
 }
 
 function record(value: unknown) {

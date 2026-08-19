@@ -14,6 +14,7 @@ const rawProviders = {
         "gpt-safe": {
           id: "gpt-safe",
           name: "GPT Safe",
+          limit: { context: 128_000, output: 8_000 },
           headers: { Authorization: "must-not-cross" },
           capabilities: { input: { image: true, audio: true, video: true, pdf: true } },
           variants: {
@@ -54,7 +55,7 @@ describe("safe catalog projection", () => {
   it("keeps only safe connected picker fields", () => {
     deepEqual(catalog.providers, [{ id: "openai", name: "OpenAI" }])
     deepEqual(catalog.models, [
-      { providerID: "openai", id: "gpt-safe", name: "GPT Safe", variants: ["high"], audio: true, image: true, video: true, pdf: true },
+      { providerID: "openai", id: "gpt-safe", name: "GPT Safe", variants: ["high"], contextLimit: 128_000, audio: true, image: true, video: true, pdf: true },
       { providerID: "openai", id: "plain", name: "Plain", variants: [], audio: false, image: false, video: false, pdf: false },
     ])
     deepEqual(catalog.agents, [
@@ -119,6 +120,7 @@ describe("safe catalog projection", () => {
           model: {
             id: "model",
             name: ` Model\u2066${"y".repeat(200)} `,
+            limit: { context: -1 },
             variants: Object.fromEntries(Array.from({ length: 120 }, (_, index) => [`v${index}`, {}])),
           },
         },
@@ -129,7 +131,27 @@ describe("safe catalog projection", () => {
     equal(projected.models[0]?.name.includes("\u2066"), false)
     equal(projected.models[0]?.name.length, 160)
     equal(projected.models[0]?.variants.length, 100)
+    equal(projected.models[0]?.contextLimit, undefined)
     deepEqual(projected.defaults, { safe: "model" })
+  })
+
+  it("keeps only a positive safe authoritative context limit", () => {
+    const projected = projectCatalog({
+      connected: ["same"],
+      default: {},
+      all: [{
+        id: "same",
+        name: "Same",
+        models: {
+          valid: { id: "valid", name: "Valid", limit: { context: 200_000 } },
+          zero: { id: "zero", name: "Zero", limit: { context: 0 } },
+          unsafe: { id: "unsafe", name: "Unsafe", limit: { context: Number.MAX_SAFE_INTEGER + 1 } },
+        },
+      }],
+    }, [{ name: "build", mode: "primary" }])
+    equal(projected.models.find((model) => model.id === "valid")?.contextLimit, 200_000)
+    equal(projected.models.find((model) => model.id === "zero")?.contextLimit, undefined)
+    equal(projected.models.find((model) => model.id === "unsafe")?.contextLimit, undefined)
   })
 
   it("matches the TUI model picker order by provider, free status, and release date", () => {

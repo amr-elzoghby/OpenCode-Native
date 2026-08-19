@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { resolve } from "node:path"
 import type { HistorySession } from "./protocol"
+import { projectUsage, type UsageTotals } from "./usage"
 
 export type SessionInfo = {
   id: string
@@ -10,6 +11,7 @@ export type SessionInfo = {
   agent?: string
   model?: { id: string; providerID: string; variant?: string }
   revert?: { messageID: string }
+  usage?: UsageTotals
   time: { created: number; updated: number; archived?: number }
 }
 
@@ -89,6 +91,7 @@ export function parseSession(value: unknown): SessionInfo | undefined {
   ) return
   const model = record(session.model)
   const revert = record(session.revert)
+  const usage = projectUsage(session.cost, session.tokens)
   if (session.revert !== undefined && (!revert || !safeRecordID(revert.messageID))) return
   return {
     id: session.id,
@@ -104,6 +107,7 @@ export function parseSession(value: unknown): SessionInfo | undefined {
       }
       : undefined,
     revert: revert ? { messageID: revert.messageID as string } : undefined,
+    ...(usage.cost === undefined && !usage.tokens ? {} : { usage }),
     time: {
       created: time.created,
       updated: time.updated,

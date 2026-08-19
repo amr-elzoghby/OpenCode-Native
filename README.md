@@ -12,6 +12,7 @@ Use OpenCode from a native VS Code sidebar while keeping the OpenCode CLI, provi
 ## Highlights
 
 - Streaming chat with OpenCode models, agents, variants, questions, and tool activity.
+- Current-context and full-session usage, plus expandable model, timing, cost, and token details for each turn.
 - Searchable session history with rename, delete, refresh, fork, undo/redo, and native diff review.
 - Provider sign-in through `/connect`, including subscription/OAuth and API-key methods exposed by OpenCode.
 - Workspace context plus local text, PDF, image, audio, and video attachments.

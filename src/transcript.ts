@@ -7,6 +7,14 @@ import {
 import { randomBytes } from "node:crypto"
 import path from "node:path"
 import { ReviewStore, type FileChangeInfo, type FileDiff, type ReviewSummary } from "./review"
+import {
+  addCosts,
+  addUsageTokens,
+  projectUsage,
+  type ResponseMetadata,
+  type TurnUsage,
+  type UsageTotals,
+} from "./usage"
 
 const MAX_TRANSCRIPT_PARTS = 2_000
 const MAX_TRANSCRIPT_FILES = 200
@@ -16,6 +24,7 @@ const MAX_ACTIVITY_PHASES = 200
 const MAX_REASONING_CHARS = 32_000
 const MAX_REASONING_TURN_CHARS = 128_000
 const MAX_REASONING_TOTAL_CHARS = 512_000
+const MAX_USAGE_PARTS = 2_000
 
 export type TranscriptMessage = {
   id: string
@@ -24,6 +33,7 @@ export type TranscriptMessage = {
   text: string
   createdAt?: number
   attachments?: string[]
+  response?: ResponseMetadata
 }
 
 export type ActivityItem = {
@@ -56,6 +66,12 @@ type MessageInfo = {
   parentID?: string
   role: "user" | "assistant"
   time: { created: number; completed?: number }
+  agent?: unknown
+  providerID?: unknown
+  modelID?: unknown
+  variant?: unknown
+  cost?: unknown
+  tokens?: unknown
   error?: { name?: string }
   summary?: boolean | {
     diffs: Array<{
@@ -66,6 +82,15 @@ type MessageInfo = {
       status?: "added" | "deleted" | "modified"
     }>
   }
+}
+
+type StoredMessage = {
+  id: string
+  parentID?: string
+  role: "user" | "assistant"
+  time: { created: number; completed?: number }
+  error?: { name?: string }
+  response?: ResponseMetadata
 }
 
 type TextPart = {
@@ -95,13 +120,21 @@ type ReasoningPart = {
   time: { start: number; end?: number }
 }
 
+type StepFinishPart = {
+  id: string
+  messageID: string
+  type: "step-finish"
+  cost: unknown
+  tokens: unknown
+}
+
 type PartRecord = {
   text: string
   snapshot: boolean
 }
 
 export class Transcript {
-  private messages = new Map<string, MessageInfo>()
+  private messages = new Map<string, StoredMessage>()
   private parts = new Map<string, Map<string, PartRecord>>()
   private files = new Map<string, Map<string, string>>()
   private hidden = new Map<string, Set<string>>()
@@ -109,11 +142,13 @@ export class Transcript {
   private turnKeys = new Map<string, string>()
   private retry?: { attempt: number; nextAt: number }
   private reasoning = new Map<string, Map<string, { text: string; time: ReasoningPart["time"] }>>()
+  private usage = new Map<string, Map<string, UsageTotals>>()
   private textLength = 0
   private partCount = 0
   private fileCount = 0
   private hiddenCount = 0
   private activityCount = 0
+  private usagePartCount = 0
   private deltasDisabled = false
   private reviews = new ReviewStore()
 
@@ -128,11 +163,13 @@ export class Transcript {
     this.turnKeys.clear()
     this.retry = undefined
     this.reasoning.clear()
+    this.usage.clear()
     this.textLength = 0
     this.partCount = 0
     this.fileCount = 0
     this.hiddenCount = 0
     this.activityCount = 0
+    this.usagePartCount = 0
     this.deltasDisabled = false
     this.reviews.clear()
   }
@@ -154,12 +191,24 @@ export class Transcript {
       if (oldest) this.removeMessage(oldest.id)
     }
     this.reviews.upsert(info)
+    const completed = safeCompleted(info.time.completed, info.time.created)
+    const usage = info.role === "assistant" ? projectUsage(info.cost, info.tokens) : {}
+    const response = info.role === "assistant" ? compactResponse({
+      completedAt: completed,
+      agent: safeMetadata(info.agent, 120),
+      providerID: safeMetadata(info.providerID, 512),
+      modelID: safeMetadata(info.modelID, 512),
+      variant: safeMetadata(info.variant, 128),
+      cost: usage.cost,
+      contextTokens: usage.tokens,
+    }) : undefined
     this.messages.set(info.id, {
       id: info.id,
       parentID: info.parentID,
       role: info.role,
-      time: { created: info.time.created, completed: info.time.completed },
+      time: { created: info.time.created, completed },
       error: info.error?.name ? { name: safeText(info.error.name, 120) } : undefined,
+      response,
     })
   }
 
@@ -240,6 +289,22 @@ export class Transcript {
     })
   }
 
+  setStepFinish(part: StepFinishPart) {
+    if (!safeID(part.messageID) || !safeID(part.id)) return
+    const parts = this.usage.get(part.messageID) ?? new Map<string, UsageTotals>()
+    const existing = parts.has(part.id)
+    const projected = projectUsage(part.cost, part.tokens)
+    if (projected.cost === undefined || !projected.tokens) {
+      if (parts.delete(part.id)) this.usagePartCount--
+      if (!parts.size) this.usage.delete(part.messageID)
+      return
+    }
+    if (!existing && this.usagePartCount >= MAX_USAGE_PARTS) return
+    parts.set(part.id, projected)
+    if (!existing) this.usagePartCount++
+    this.usage.set(part.messageID, parts)
+  }
+
   appendReasoning(messageID: string, partID: string, delta: string) {
     const part = this.reasoning.get(messageID)?.get(partID)
     if (!part) return false
@@ -282,6 +347,8 @@ export class Transcript {
     this.hidden.delete(messageID)
     this.activities.delete(messageID)
     this.reasoning.delete(messageID)
+    this.usagePartCount -= this.usage.get(messageID)?.size ?? 0
+    this.usage.delete(messageID)
     this.turnKeys.delete(messageID)
     if (turnID && ![...this.messages.values()].some((message) =>
       (message.role === "user" ? message.id : message.parentID ?? message.id) === turnID
@@ -297,6 +364,8 @@ export class Transcript {
     if (this.hidden.get(messageID)?.delete(partID)) this.hiddenCount--
     this.removeActivityItem(messageID, partID)
     this.reasoning.get(messageID)?.delete(partID)
+    if (this.usage.get(messageID)?.delete(partID)) this.usagePartCount--
+    if (this.usage.get(messageID)?.size === 0) this.usage.delete(messageID)
   }
 
   hidePart(messageID: string, partID: string) {
@@ -316,12 +385,13 @@ export class Transcript {
     if (part && this.parts.get(messageID)?.delete(partID)) this.partCount--
   }
 
-  replace(messages: Array<{ info: MessageInfo; parts: Array<TextPart | FilePart | ToolPart | ReasoningPart> }>) {
+  replace(messages: Array<{ info: MessageInfo; parts: Array<TextPart | FilePart | ToolPart | ReasoningPart | StepFinishPart> }>) {
     this.clear()
     messages.slice(-MAX_TRANSCRIPT_MESSAGES).forEach((message) => {
       this.upsertMessage(message.info)
       message.parts.forEach((part) => {
         if ("type" in part && part.type === "reasoning") this.setReasoning(part)
+        else if ("type" in part && part.type === "step-finish") this.setStepFinish(part)
         else if ("text" in part) this.setPart(part)
         else if ("tool" in part) this.setTool(part)
         else this.setFile(part)
@@ -350,10 +420,31 @@ export class Transcript {
             .join("\n\n")
             .slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS),
           ...(attachments.length ? { attachments } : {}),
+          ...(message.response ? { response: message.response } : {}),
         }
       })
       .filter((message) => message.text.length > 0 || !!message.attachments?.length ||
         (message.role === "assistant" && (this.activities.get(message.id)?.items.size || message.id === retryMessageID)))
+  }
+
+  turnUsageSnapshot(): TurnUsage[] {
+    const visibleTurns = new Set(this.snapshot().map((message) => message.turnID))
+    const totals = new Map<string, UsageTotals[]>()
+    ;[...this.messages.values()]
+      .filter((message) => message.role === "assistant" && visibleTurns.has(message.parentID ?? message.id))
+      .sort((a, b) => a.time.created - b.time.created)
+      .forEach((message) => {
+        const steps = [...(this.usage.get(message.id)?.values() ?? [])]
+        if (!steps.length) return
+        const turnID = message.parentID ?? message.id
+        totals.set(turnID, [...(totals.get(turnID) ?? []), ...steps])
+      })
+    return [...totals].flatMap(([turnID, steps]) => {
+      const cost = addCosts(steps.flatMap((step) => step.cost === undefined ? [] : [step.cost]))
+      const tokens = addUsageTokens(steps.flatMap((step) => step.tokens ? [step.tokens] : []))
+      if (cost === undefined && !tokens) return []
+      return [{ turnID, ...(cost === undefined ? {} : { cost }), ...(tokens ? { tokens } : {}) }]
+    })
   }
 
   reviewSnapshot(): ReviewSummary[] {
@@ -567,6 +658,28 @@ function reasoningSummary(value: string) {
   const match = value.match(/^\*\*([^*\n]+)\*\*(?:\r?\n\r?\n|$)/)
   if (!match) return { title: undefined, body: value }
   return { title: safeText(match[1], 120), body: value.slice(match[0].length).trimEnd() }
+}
+
+function compactResponse(value: ResponseMetadata) {
+  const response: ResponseMetadata = {}
+  if (value.completedAt !== undefined) response.completedAt = value.completedAt
+  if (value.agent !== undefined) response.agent = value.agent
+  if (value.providerID !== undefined) response.providerID = value.providerID
+  if (value.modelID !== undefined) response.modelID = value.modelID
+  if (value.variant !== undefined) response.variant = value.variant
+  if (value.cost !== undefined) response.cost = value.cost
+  if (value.contextTokens !== undefined) response.contextTokens = value.contextTokens
+  return Object.keys(response).length ? response : undefined
+}
+
+function safeCompleted(value: unknown, created: number) {
+  return Number.isSafeInteger(value) && Number(value) >= created && Number(value) <= 8_640_000_000_000_000
+    ? Number(value)
+    : undefined
+}
+
+function safeMetadata(value: unknown, maximum: number) {
+  return safeText(value, maximum)
 }
 
 function safePath(value: unknown, directory?: string) {

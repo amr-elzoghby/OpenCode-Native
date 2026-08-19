@@ -547,6 +547,130 @@ describe("canonical session mutations", () => {
   })
 })
 
+describe("official usage event projection", () => {
+  it("keeps response context, unique turn steps, and session totals separate", () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.transcript = new Transcript()
+    internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "message.updated",
+        properties: { info: {
+          id: "user-usage", sessionID: "old", role: "user", time: { created: 1 },
+          agent: "build", model: { providerID: "provider", modelID: "safe-model" },
+        } },
+      },
+    } as never)
+    internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "message.part.updated",
+        properties: { part: {
+          id: "user-text", sessionID: "old", messageID: "user-usage", type: "text", text: "question",
+        } },
+      },
+    } as never)
+    internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "message.updated",
+        properties: { info: {
+          id: "assistant-usage", sessionID: "old", parentID: "user-usage", role: "assistant",
+          time: { created: 2, completed: 5 }, agent: "build", providerID: "provider", modelID: "safe-model",
+          cost: 0.03,
+          tokens: { input: 20, output: 2, reasoning: 0, cache: { read: 4, write: 0 } },
+        } },
+      },
+    } as never)
+    internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "message.part.updated",
+        properties: { part: {
+          id: "assistant-text", sessionID: "old", messageID: "assistant-usage", type: "text", text: "answer",
+        } },
+      },
+    } as never)
+    ;[{
+      id: "step-1", cost: 0.01,
+      tokens: { input: 4, output: 1, reasoning: 0, cache: { read: 2, write: 0 } },
+    }, {
+      id: "step-2", cost: 0.02,
+      tokens: { input: 6, output: 2, reasoning: 1, cache: { read: 3, write: 1 } },
+    }].forEach((step) => internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "message.part.updated",
+        properties: { part: {
+          ...step, sessionID: "old", messageID: "assistant-usage", type: "step-finish", reason: "stop",
+        } },
+      },
+    } as never))
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.updated", properties: { info: {
+        ...info("old", 2),
+        cost: 0.04,
+        tokens: { input: 30, output: 4, reasoning: 1, cache: { read: 8, write: 1 } },
+      } } },
+    } as never)
+    internal.flushRender()
+
+    const state = session.snapshot()
+    equal(state.messages[1]?.response?.cost, 0.03)
+    equal(state.messages[1]?.response?.contextTokens?.total, 26)
+    equal(state.turnUsage[0]?.cost, 0.03)
+    equal(state.turnUsage[0]?.tokens?.total, 20)
+    equal(state.sessionUsage.cost, 0.04)
+    equal(state.sessionUsage.tokens?.total, 44)
+  })
+
+  it("hydrates step-finish records through the official messages endpoint", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.attempt!.client = {
+      session: {
+        messages: async () => ({ data: [{
+          info: {
+            id: "assistant-hydrated", sessionID: "old", parentID: "user-hydrated", role: "assistant",
+            time: { created: 2, completed: 4 }, agent: "build", providerID: "provider", modelID: "safe-model",
+            cost: 0.01,
+            tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 2, write: 0 } },
+          },
+          parts: [
+            { id: "text", sessionID: "old", messageID: "assistant-hydrated", type: "text", text: "answer" },
+            {
+              id: "finish", sessionID: "old", messageID: "assistant-hydrated", type: "step-finish", reason: "stop", cost: 0.01,
+              tokens: { input: 5, output: 1, reasoning: 0, cache: { read: 2, write: 0 } },
+            },
+          ],
+        }] }),
+      },
+    }
+    internal.changeList = async () => ({ data: [] })
+    const transcript = await internal.loadTranscript(internal.attempt!, "old")
+    equal(transcript.snapshot()[0]?.response?.modelID, "safe-model")
+    equal(transcript.turnUsageSnapshot()[0]?.tokens?.total, 8)
+  })
+
+  it("refreshes the authoritative full-session aggregate after idle reconciliation", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.promptBusy = true
+    internal.loadTranscript = async () => transcript("complete")
+    internal.attempt!.client = {
+      session: {
+        get: async () => ({ data: {
+          ...info("old", 2),
+          cost: 0.25,
+          tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 30, write: 2 } },
+        } }),
+      },
+    }
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.idle", properties: { sessionID: "old" } },
+    } as never)
+    await internal.attempt!.reconciling
+    equal(session.snapshot().sessionUsage.cost, 0.25)
+    equal(session.snapshot().sessionUsage.tokens?.total, 157)
+  })
+})
+
 describe("native review session isolation", () => {
   it("hydrates persisted authoritative change records after restart without session.diff", async () => {
     const session = controller("old")

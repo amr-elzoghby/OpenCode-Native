@@ -1,4 +1,5 @@
 import { MAX_TRANSCRIPT_MESSAGE_CHARS, type ViewState } from "./protocol"
+import { formatCost, formatTokens } from "./webview-usage"
 
 type Token = import("marked", { with: { "resolution-mode": "import" } }).Token
 type Lexer = typeof import("marked", { with: { "resolution-mode": "import" } }).lexer
@@ -7,14 +8,29 @@ type Message = ViewState["messages"][number]
 type Review = ViewState["reviews"][number]
 type Activity = ViewState["activities"][number]
 type ActivityItem = Activity["items"][number]
-type Turn = { id: string; prompt?: Message; responses: Message[]; activities: Activity[]; review?: Review }
+type TranscriptCatalog = {
+  agents: ViewState["agents"]
+  providers: ViewState["providers"]
+  models: ViewState["models"]
+  turnUsage: ViewState["turnUsage"]
+}
+type Turn = {
+  id: string
+  prompt?: Message
+  responses: Message[]
+  activities: Activity[]
+  review?: Review
+  usage?: ViewState["turnUsage"][number]
+}
 type ResponseView = { element: HTMLElement; text: string; createdAt?: number }
 type TurnView = {
   element: HTMLElement
   prompt: HTMLElement
   promptText?: string
+  promptSignature?: string
   responses: Map<string, ResponseView>
   review?: { element: HTMLElement; signature: string }
+  metadata?: { element: HTMLDetailsElement; signature: string }
   activities: Map<string, ActivityView>
 }
 
@@ -38,6 +54,7 @@ export function createTranscript(
   let latest: Message[] = []
   let latestReviews: Review[] = []
   let latestActivities: Activity[] = []
+  let latestCatalog: TranscriptCatalog = { agents: [], providers: [], models: [], turnUsage: [] }
   let lexer: Lexer | undefined
   let frame = 0
   let activityExpansion: boolean | undefined
@@ -47,7 +64,7 @@ export function createTranscript(
     views.forEach((view) => view.responses.forEach((response) => {
       response.text = ""
     }))
-    render(latest, latestReviews, latestActivities)
+    render(latest, latestReviews, latestActivities, latestCatalog)
   })
 
   transcript.addEventListener("scroll", scheduleSticky)
@@ -61,11 +78,12 @@ export function createTranscript(
   })
 
   return {
-    render(messages: Message[], reviews: Review[], activities: Activity[]) {
+    render(messages: Message[], reviews: Review[], activities: Activity[], catalog: TranscriptCatalog) {
       latest = messages
       latestReviews = reviews
       latestActivities = activities
-      render(messages, reviews, activities)
+      latestCatalog = catalog
+      render(messages, reviews, activities, catalog)
     },
     toggleActivities() {
       const details = Array.from(transcript.querySelectorAll<HTMLDetailsElement>(".turn-activity"))
@@ -90,9 +108,14 @@ export function createTranscript(
     },
   }
 
-  function render(messages: Message[], reviews: Review[] = [], activities: Activity[] = []) {
+  function render(
+    messages: Message[],
+    reviews: Review[] = [],
+    activities: Activity[] = [],
+    catalog: TranscriptCatalog = latestCatalog,
+  ) {
     const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80
-    const turns = group(messages, reviews, activities)
+    const turns = group(messages, reviews, activities, catalog.turnUsage)
     const retained = new Set(turns.map((turn) => turn.id))
     views.forEach((view, id) => {
       if (retained.has(id)) return
@@ -102,7 +125,7 @@ export function createTranscript(
     ordered = turns.map((turn) => {
       const view = views.get(turn.id) ?? createTurn(turn.id)
       views.set(turn.id, view)
-      updateTurn(view, turn)
+      updateTurn(view, turn, catalog)
       transcript.append(view.element)
       return view
     })
@@ -125,12 +148,19 @@ export function createTranscript(
     return { element, prompt, responses: new Map(), activities: new Map() }
   }
 
-  function updateTurn(view: TurnView, turn: Turn) {
+  function updateTurn(view: TurnView, turn: Turn, catalog: TranscriptCatalog) {
     view.prompt.hidden = !turn.prompt
+    if (!turn.prompt) {
+      view.promptText = undefined
+      view.promptSignature = undefined
+      view.prompt.removeAttribute("title")
+      view.prompt.tabIndex = -1
+    }
     const promptText = turn.prompt
       ? [turn.prompt.text, ...(turn.prompt.attachments ?? []).map((item) => `@${item}`)].filter(Boolean).join(" · ")
       : undefined
-    if (turn.prompt && view.promptText !== promptText) {
+    const promptSignature = turn.prompt ? JSON.stringify([promptText, turn.prompt.createdAt]) : undefined
+    if (turn.prompt && view.promptSignature !== promptSignature) {
       const files = document.createElement("div")
       files.className = "turn-attachments"
       ;(turn.prompt.attachments ?? []).forEach((item) => {
@@ -147,6 +177,10 @@ export function createTranscript(
         ...messageTime(turn.prompt.createdAt),
       )
       view.promptText = promptText
+      view.promptSignature = promptSignature
+      view.prompt.tabIndex = turn.prompt.createdAt === undefined ? -1 : 0
+      const sent = formatTimestamp(turn.prompt.createdAt)
+      view.prompt.title = sent === "—" ? "" : `Sent ${sent}`
     }
 
     const assistant = view.element.querySelector<HTMLElement>(".turn-response")
@@ -194,6 +228,7 @@ export function createTranscript(
       if (renderedActivities.has(activity.messageID)) return
       assistant.append(updateActivity(view, activity).element)
     })
+    updateMetadata(view, assistant, turn, catalog)
     updateReview(view, assistant, reviewReady(turn.activities) ? turn.review : undefined)
   }
 
@@ -235,6 +270,71 @@ export function createTranscript(
       current.region.prepend(marker)
     }
     return current
+  }
+
+  function updateMetadata(view: TurnView, parent: HTMLElement, turn: Turn, catalog: TranscriptCatalog) {
+    const latest = [...turn.responses].reverse().find((message) => message.response)?.response
+    if (!latest) {
+      view.metadata?.element.remove()
+      view.metadata = undefined
+      return
+    }
+    const started = minimum(turn.responses.flatMap((message) => message.createdAt === undefined ? [] : [message.createdAt]))
+    const completedValues = turn.responses.flatMap((message) =>
+      message.response?.completedAt === undefined ? [] : [message.response.completedAt]
+    )
+    const completed = completedValues.length === turn.responses.length ? maximum(completedValues) : undefined
+    const duration = started !== undefined && completed !== undefined ? formatDuration(completed - started) : "—"
+    const agent = catalog.agents.find((item) => item.id === latest.agent)?.name ?? latest.agent
+    const provider = catalog.providers.find((item) => item.id === latest.providerID)?.name ?? latest.providerID
+    const model = catalog.models.find((item) =>
+      item.providerID === latest.providerID && item.id === latest.modelID
+    )?.name ?? latest.modelID
+    const cost = turn.usage?.cost ?? latest.cost
+    const tokens = turn.usage?.tokens
+    const signature = JSON.stringify({ started, completed, agent, provider, model, variant: latest.variant, cost, tokens })
+    if (view.metadata?.signature === signature) {
+      parent.append(view.metadata.element)
+      return
+    }
+    const open = view.metadata?.element.open ?? false
+    view.metadata?.element.remove()
+    const element = document.createElement("details")
+    element.className = "turn-metadata"
+    element.open = open
+    const summary = document.createElement("summary")
+    summary.className = "turn-metadata-summary"
+    summary.setAttribute("aria-label", `Turn details: ${agent ?? "—"}, ${model ?? "—"}, ${duration}`)
+    summary.append(
+      isolated(agent ?? "—", "auto"),
+      separator(),
+      isolated(model ?? "—", "ltr"),
+      separator(),
+      isolated(duration, "ltr"),
+    )
+    const region = document.createElement("div")
+    region.className = "turn-metadata-region"
+    region.setAttribute("role", "region")
+    region.setAttribute("aria-label", "Turn usage and response details")
+    region.append(descriptionList([
+      ["Started", formatTimestamp(started)],
+      ["Completed", formatTimestamp(completed)],
+      ["Duration", duration],
+      ["Agent", agent ?? "—", "auto"],
+      ["Provider", provider ?? "—", "auto"],
+      ["Model", model ?? "—", "auto"],
+      ["Variant", latest.variant ?? "—", "auto"],
+      ["Cost", formatCost(cost)],
+      ["Input", formatTokens(tokens?.input)],
+      ["Output", formatTokens(tokens?.output)],
+      ["Reasoning", formatTokens(tokens?.reasoning)],
+      ["Cache read", formatTokens(tokens?.cacheRead)],
+      ["Cache write", formatTokens(tokens?.cacheWrite)],
+      ["Tokens", formatTokens(tokens?.total)],
+    ]))
+    element.append(summary, region)
+    view.metadata = { element, signature }
+    parent.append(element)
   }
 
   function updateReview(view: TurnView, parent: HTMLElement, review: Review | undefined) {
@@ -284,10 +384,16 @@ function messageTime(value: number | undefined) {
   element.className = "message-time"
   element.dateTime = new Date(value).toISOString()
   element.textContent = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(value)
+  element.setAttribute("aria-label", formatTimestamp(value))
   return [element]
 }
 
-function group(messages: Message[], reviews: Review[], activities: Activity[]) {
+function group(
+  messages: Message[],
+  reviews: Review[],
+  activities: Activity[],
+  usage: ViewState["turnUsage"] = [],
+) {
   const turns = new Map<string, Turn>()
   messages.forEach((message) => {
     const turn = turns.get(message.turnID) ?? { id: message.turnID, responses: [], activities: [] }
@@ -303,6 +409,10 @@ function group(messages: Message[], reviews: Review[], activities: Activity[]) {
     const turn = turns.get(activity.turnID) ?? { id: activity.turnID, responses: [], activities: [] }
     turn.activities.push(activity)
     turns.set(activity.turnID, turn)
+  })
+  usage.forEach((item) => {
+    const turn = turns.get(item.turnID)
+    if (turn) turn.usage = item
   })
   return [...turns.values()]
 }
@@ -416,9 +526,52 @@ function activitySummary(items: ActivityItem[]) {
   }).map((phrase, index) => index ? phrase.charAt(0).toLowerCase() + phrase.slice(1) : phrase).join(", ")
 }
 
-function formatDuration(milliseconds: number) {
+export function formatDuration(milliseconds: number) {
   if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`
   return `${Math.round(milliseconds / 1_000)}s`
+}
+
+export function formatTimestamp(value: number | undefined) {
+  if (value === undefined || !Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000_000) return "—"
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  }).format(value)
+}
+
+function minimum(values: number[]) {
+  return values.length ? Math.min(...values) : undefined
+}
+
+function maximum(values: number[]) {
+  return values.length ? Math.max(...values) : undefined
+}
+
+function separator() {
+  const value = document.createElement("span")
+  value.className = "metadata-separator"
+  value.setAttribute("aria-hidden", "true")
+  value.textContent = "·"
+  return value
+}
+
+function isolated(value: string, direction: "auto" | "ltr") {
+  const element = document.createElement("bdi")
+  element.dir = direction
+  element.textContent = value
+  return element
+}
+
+function descriptionList(rows: Array<[string, string, ("auto" | "ltr")?]>) {
+  const list = document.createElement("dl")
+  rows.forEach(([label, value, direction]) => {
+    const term = document.createElement("dt")
+    term.textContent = label
+    const detail = document.createElement("dd")
+    detail.append(isolated(value, direction ?? "ltr"))
+    list.append(term, detail)
+  })
+  return list
 }
 
 function reviewCard(review: Review, open: (reviewKey: string, fileKey: string) => void) {

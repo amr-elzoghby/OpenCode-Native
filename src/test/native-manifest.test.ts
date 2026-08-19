@@ -236,6 +236,27 @@ describe("Native command wiring", () => {
     equal(webview.indexOf("turn.activities.forEach") < webview.indexOf("updateReview(view, assistant"), true)
   })
 
+  it("keeps usage typed, Core-authored, keyboard-readable, and separate by scope", () => {
+    const transcript = readFileSync(join(root, "src", "transcript.ts"), "utf8")
+    const session = readFileSync(join(root, "src", "session.ts"), "utf8")
+    const protocol = readFileSync(join(root, "src", "protocol.ts"), "utf8")
+    const usage = readFileSync(join(root, "src", "webview-usage.ts"), "utf8")
+    const webview = readFileSync(join(root, "src", "webview-transcript.ts"), "utf8")
+    const sidebar = readFileSync(join(root, "src", "sidebar.ts"), "utf8")
+    equal(session.includes('part.type === "step-finish"'), true)
+    equal(session.includes("loadSessionUsage"), true)
+    equal(transcript.includes("turnUsageSnapshot"), true)
+    equal(protocol.includes("sessionUsage: UsageTotals"), true)
+    equal(protocol.includes("contextLimit?: number"), true)
+    equal(usage.includes('setAttribute("aria-haspopup", "dialog")'), true)
+    equal(usage.includes('event.key !== "Escape"'), true)
+    equal(usage.includes("innerHTML"), false)
+    equal(usage.includes("postMessage"), false)
+    equal(webview.includes('document.createElement("details")'), true)
+    equal(webview.includes('view.prompt.tabIndex = turn.prompt.createdAt === undefined ? -1 : 0'), true)
+    equal(sidebar.includes('id="usage" aria-label="Usage"'), true)
+  })
+
   it("rejects stale VSIX bundles byte-for-byte", () => {
     const manifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { scripts: Record<string, string> }
     const packager = readFileSync(join(root, "script", "package-vsix.mjs"), "utf8")
