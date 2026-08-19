@@ -201,7 +201,9 @@ export class SessionController {
   }
 
   async review(reviewKey: string, fileKey: string) {
-    if (this.mutationBusy || this.transitioning) throw new Error("That file review is changing. Try again when chat history is ready.")
+    if (this.mutationBusy || this.transitioning || this.attempt?.boundarySync) {
+      throw new Error("That file review is changing. Try again when chat history is ready.")
+    }
     const permissionDocument = this.permissions.resolveReview(reviewKey, fileKey)
     if (permissionDocument) return permissionDocument
     if (this.mutationBusy) throw new Error("Wait for the current chat change before opening its file review.")
@@ -333,7 +335,7 @@ export class SessionController {
   selectAgent(id: string) {
     const catalog = this.attempt?.catalog
     if (!catalog || !catalog.agents.some((agent) => agent.id === id)) return false
-    if (this.promptBusy || this.transitioning || this.mutationBusy) return true
+    if (this.promptBusy || this.transitioning || this.mutationBusy || this.attempt?.boundarySync) return true
     this.setSelection(resolveSelection(catalog, { agent: id }))
     return true
   }
@@ -343,7 +345,7 @@ export class SessionController {
     if (!catalog || !catalog.models.some((item) => item.providerID === model.providerID && item.id === model.modelID)) {
       return false
     }
-    if (this.promptBusy || this.transitioning || this.mutationBusy) return true
+    if (this.promptBusy || this.transitioning || this.mutationBusy || this.attempt?.boundarySync) return true
     const selection = resolveSelection(catalog, { ...this.state.selection, model, variant: undefined })
     this.setSelection(selection)
     return true
@@ -354,7 +356,7 @@ export class SessionController {
     if (!catalog) return false
     const selection = { ...this.state.selection, variant }
     if (!acceptsSelection(catalog, selection)) return false
-    if (this.promptBusy || this.transitioning || this.mutationBusy) return true
+    if (this.promptBusy || this.transitioning || this.mutationBusy || this.attempt?.boundarySync) return true
     this.setSelection(selection)
     return true
   }
@@ -571,7 +573,7 @@ export class SessionController {
   }
 
   async compact() {
-    if (this.mutationBusy || this.promptBusy || this.submitting || this.transitioning) return false
+    if (this.mutationBusy || this.promptBusy || this.submitting || this.transitioning || this.attempt?.boundarySync) return false
     const attempt = this.attempt
     const sessionID = attempt?.sessionID
     const selection = this.state.selection
@@ -812,8 +814,8 @@ export class SessionController {
   }
 
   newChat() {
-    if (this.promptBusy || this.mutationBusy) return false
     const attempt = this.attempt
+    if (this.promptBusy || this.mutationBusy || attempt?.boundarySync) return false
     if (attempt) {
       attempt.sessionID = undefined
       attempt.deferredBoundary = undefined
@@ -901,11 +903,11 @@ export class SessionController {
   }
 
   switchSession(key: string) {
-    if (this.promptBusy || this.submitting || this.mutationBusy) {
+    const attempt = this.attempt
+    if (this.promptBusy || this.submitting || this.mutationBusy || attempt?.boundarySync) {
       this.update({ error: "Wait for the current OpenCode response before switching chats." })
       return Promise.resolve(false)
     }
-    const attempt = this.attempt
     const target = attempt?.history?.resolve(key)
     if (!attempt?.client || !target) {
       this.update({ error: "That OpenCode chat is no longer available." })
@@ -958,6 +960,7 @@ export class SessionController {
         if (pending) attempt.pendingEvents = undefined
         if (this.transitioning === transitioning) this.transitioning = undefined
         this.replayQueuedBoundary(attempt, pending)
+        this.resumeDeferredBoundarySync()
       })
     attempt.pendingEvents = { sessionID: target.id, generation, events: [], overflow: false }
     this.transitioning = transitioning
@@ -971,7 +974,7 @@ export class SessionController {
     }
     const attempt = this.attempt
     if (!attempt?.client || !attempt.sessionID) return Promise.resolve(true)
-    if (this.promptBusy || this.submitting || this.mutationBusy || attempt.reconciling) {
+    if (this.promptBusy || this.submitting || this.mutationBusy || attempt.reconciling || attempt.boundarySync) {
       this.update({ error: "Wait for the current OpenCode response before refreshing." })
       return Promise.resolve(false)
     }
@@ -1040,6 +1043,7 @@ export class SessionController {
         if (pending) attempt.pendingEvents = undefined
         if (this.transitioning === transitioning) this.transitioning = undefined
         this.replayQueuedBoundary(attempt, pending)
+        this.resumeDeferredBoundarySync()
       })
     attempt.pendingEvents = { sessionID, generation, events: [], overflow: false }
     this.transitioning = transitioning
@@ -1060,7 +1064,7 @@ export class SessionController {
   }
 
   send(requestID: string, directory: string, text: string, files: PromptFilePart[] = []) {
-    if (this.promptBusy || this.submitting || this.transitioning || this.mutationBusy) {
+    if (this.promptBusy || this.submitting || this.transitioning || this.mutationBusy || this.attempt?.boundarySync) {
       this.submissionTracker.rejectRequest(requestID, "OpenCode is already responding.")
       return Promise.resolve(false)
     }
@@ -1084,7 +1088,7 @@ export class SessionController {
     argumentsValue: string,
     files: PromptFilePart[] = [],
   ) {
-    if (this.promptBusy || this.submitting || this.transitioning || this.mutationBusy) {
+    if (this.promptBusy || this.submitting || this.transitioning || this.mutationBusy || this.attempt?.boundarySync) {
       this.submissionTracker.rejectRequest(requestID, "OpenCode is already responding.")
       return Promise.resolve(false)
     }
@@ -1696,6 +1700,9 @@ export class SessionController {
   }
 
   private syncHistoryBoundary(attempt: Attempt, sessionID: string, generation: number) {
+    if (this.currentAttempt(attempt, generation) && attempt.sessionID === sessionID) {
+      this.update({ phase: "syncing", error: undefined })
+    }
     const syncing = this.reloadAfterHistoryMutation(attempt, sessionID, generation)
       .then((changed) => {
         if (!changed && this.currentAttempt(attempt, generation) && attempt.sessionID === sessionID) {
@@ -1858,7 +1865,10 @@ export class SessionController {
     if (
       attempt.deferredBoundary?.sessionID === hydrated.session.id &&
       attempt.deferredBoundary.messageID === boundaryMessageID
-    ) attempt.deferredBoundary = undefined
+    ) {
+      attempt.deferredBoundary = undefined
+      attempt.reconcileRequested = false
+    }
     const projected = hydrated.rolledBack
     if (!boundaryMessageID || !projected?.count) {
       this.clearRolledBack()
@@ -1965,7 +1975,7 @@ export class SessionController {
     operation: () => Promise<Value>,
     busyMessage = "Wait for the current chat change to finish.",
   ): Promise<Value | false> {
-    if (this.mutationBusy || this.promptBusy || this.submitting || this.transitioning) {
+    if (this.mutationBusy || this.promptBusy || this.submitting || this.transitioning || this.attempt?.boundarySync) {
       this.update({ error: busyMessage })
       return false
     }
@@ -2269,10 +2279,6 @@ function eventSessionID(event: GlobalEvent) {
   if (event.payload.type === "message.updated") return event.payload.properties.info.sessionID
   if (event.payload.type === "message.part.updated") return event.payload.properties.part.sessionID
   const properties = record(record(event.payload)?.properties)
-  if (event.payload.type === "session.updated") {
-    const session = record(properties?.info)
-    return typeof session?.id === "string" ? session.id : undefined
-  }
   return typeof properties?.sessionID === "string" ? properties.sessionID : undefined
 }
 

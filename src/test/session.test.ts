@@ -203,6 +203,61 @@ describe("atomic session transitions", () => {
     deepEqual(session.snapshot().messages.map((message) => message.text), ["old prompt"])
   })
 
+  it("resumes a deferred current-session rollback when a target-session transition fails", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const history = new SessionHistory("/workspace", () => "opaque_session_key_transition")
+    const key = history.replace([info("target", 2)], {}, undefined)[0]!.key
+    const boundaryHydration = deferred<{
+      session: SessionInfo
+      transcript: Transcript
+      rolledBack: {
+        count: number
+        truncated: boolean
+        targets: Array<{ messageID: string; preview: string }>
+      }
+    }>()
+    internal.attempt!.history = history
+    internal.loadStableSession = async (_attempt, sessionID) => {
+      if (sessionID === "target") throw new Error("failure")
+      return boundaryHydration.promise
+    }
+
+    const switching = session.switchSession(key)
+    internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "session.updated",
+        properties: { info: { ...info("old", 3), revert: { messageID: "user-2" } } },
+      },
+    } as never)
+
+    equal(await switching, false)
+    equal(session.snapshot().phase, "syncing")
+    equal(await session.send("request_boundary_send", "/workspace", "must wait"), false)
+    equal(await session.runCommand("request_boundary_command", "/workspace", "opaque_command_key", ""), false)
+    equal(await session.renameCurrentSession("must wait"), false)
+    equal(session.newChat(), false)
+    equal(await session.switchSession(key), false)
+    equal(await session.refresh(), false)
+    boundaryHydration.resolve({
+      session: { ...info("old", 3), revert: { messageID: "user-2" } },
+      transcript: visibleTurnHistory("user-2"),
+      rolledBack: {
+        count: 2,
+        truncated: false,
+        targets: [
+          { messageID: "user-2", preview: "question 2" },
+          { messageID: "user-3", preview: "question 3" },
+        ],
+      },
+    })
+    await internal.attempt!.boundarySync
+    equal(internal.attempt!.sessionID, "old")
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
+    equal(session.snapshot().rolledBack.count, 2)
+    equal(session.snapshot().phase, "ready")
+  })
+
   it("refreshes an idle session and re-resolves its catalog selection", async () => {
     const session = controller("old")
     const internal = internals(session)
@@ -303,7 +358,23 @@ describe("atomic session transitions", () => {
     const session = controller("old")
     const internal = internals(session)
     const hydration = deferred<{ session: SessionInfo; transcript: Transcript }>()
-    internal.loadStableSession = async () => hydration.promise
+    let hydrations = 0
+    internal.loadStableSession = async () => {
+      hydrations++
+      if (hydrations === 1) return hydration.promise
+      return {
+        session: { ...info("old", 3), revert: { messageID: "user-2" } },
+        transcript: visibleTurnHistory("user-2"),
+        rolledBack: {
+          count: 2,
+          truncated: false,
+          targets: [
+            { messageID: "user-2", preview: "question 2" },
+            { messageID: "user-3", preview: "question 3" },
+          ],
+        },
+      }
+    }
     internal.loadCatalog = async () => catalog("safe-model")
 
     const refreshing = session.refresh()
@@ -316,7 +387,10 @@ describe("atomic session transitions", () => {
     hydration.resolve({ session: info("old", 2), transcript: transcript("stale pre-revert") })
 
     equal(await refreshing, false)
-    deepEqual(session.snapshot().messages.map((message) => message.text), ["old prompt"])
+    await internal.attempt!.boundarySync
+    equal(hydrations, 2)
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
+    equal(session.snapshot().rolledBack.count, 2)
   })
 
   it("discards late hydration after New Chat", async () => {
@@ -1255,26 +1329,50 @@ describe("native slash session mutations", () => {
     internal.transcript = turnHistory(3)
     internal.transcript.setReview("user-2", [{ file: "src/reverted.ts", additions: 1, deletions: 0 }])
     internal.flushRender()
-    internal.loadTranscript = async () => visibleTurnHistory(internal.attempt?.revertMessageID)
+    let marker: string | undefined = "user-2"
+    internal.loadStableSession = async () => ({
+      session: {
+        ...info("old", marker ? 2 : 3),
+        ...(marker ? { revert: { messageID: marker } } : {}),
+        usage: { cost: marker ? 2 : 3 },
+      },
+      transcript: visibleTurnHistory(marker),
+      ...(marker ? {
+        rolledBack: {
+          count: 2,
+          truncated: false,
+          targets: [
+            { messageID: "user-2", preview: "question 2" },
+            { messageID: "user-3", preview: "question 3" },
+          ],
+        },
+      } : {}),
+    })
     internal.applyEvent(internal.attempt!, {
       payload: {
-        type: "session.updated",
-        properties: { info: { ...info("old", 2), revert: { messageID: "user-2" } } },
+        type: "session.updated", properties: {
+          info: { ...info("old", 2), revert: { messageID: "user-2" }, cost: 2 },
+        },
       },
     } as never)
-    await internal.attempt!.reconciling
+    await internal.attempt!.boundarySync
     equal(session.hasUndoneTurns(), true)
     deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
     deepEqual(session.snapshot().reviews, [])
+    equal(session.snapshot().rolledBack.count, 2)
+    equal(session.snapshot().sessionUsage.cost, 2)
 
+    marker = undefined
     internal.applyEvent(internal.attempt!, {
-      payload: { type: "session.updated", properties: { info: info("old", 3) } },
+      payload: { type: "session.updated", properties: { info: { ...info("old", 3), cost: 3 } } },
     } as never)
-    await internal.attempt!.reconciling
+    await internal.attempt!.boundarySync
     equal(session.hasUndoneTurns(), false)
     deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), [
       "user-1", "user-2", "user-3",
     ])
+    equal(session.snapshot().rolledBack.count, 0)
+    equal(session.snapshot().sessionUsage.cost, 3)
   })
 
   it("runs a queued external-revert reconcile after an unrelated chat mutation finishes", async () => {
@@ -1284,9 +1382,20 @@ describe("native slash session mutations", () => {
     internal.flushRender()
     const shared = deferred<{ data: ReturnType<typeof info> & { share: { url: string } } }>()
     let loads = 0
-    internal.loadTranscript = async () => {
+    internal.loadStableSession = async () => {
       loads++
-      return visibleTurnHistory(internal.attempt?.revertMessageID)
+      return {
+        session: { ...info("old", 2), revert: { messageID: "user-2" } },
+        transcript: visibleTurnHistory("user-2"),
+        rolledBack: {
+          count: 2,
+          truncated: false,
+          targets: [
+            { messageID: "user-2", preview: "question 2" },
+            { messageID: "user-3", preview: "question 3" },
+          ],
+        },
+      }
     }
     internal.attempt!.client = { session: { share: async () => shared.promise } }
     const sharing = session.shareCurrentSession()
@@ -1300,10 +1409,11 @@ describe("native slash session mutations", () => {
     equal(loads, 0)
     shared.resolve({ data: { ...info("old", 3), share: { url: "https://share.opencode.ai/safe" } } })
     equal(await sharing, "https://share.opencode.ai/safe")
-    await internal.attempt!.reconciling
+    await internal.attempt!.boundarySync
 
     equal(loads, 1)
     deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
+    equal(session.snapshot().rolledBack.count, 2)
   })
 
   it("defers an external rollback boundary during an unrelated mutation, then reconciles it", async () => {
@@ -1379,6 +1489,50 @@ describe("native slash session mutations", () => {
     equal(await session.unshareCurrentSession(), false)
   })
 
+  it("consumes a matching own-undo SSE boundary without launching an ordinary reconcile", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.transcript = turnHistory(2)
+    internal.flushRender()
+    let marker: string | undefined
+    let transcriptLoads = 0
+    const current = () => ({ ...info("old", 10), ...(marker ? { revert: { messageID: marker } } : {}) })
+    internal.loadTranscript = async () => {
+      transcriptLoads++
+      return visibleTurnHistory(marker)
+    }
+    internal.loadStableSession = async () => ({
+      session: current(),
+      transcript: visibleTurnHistory(marker),
+      rolledBack: marker ? {
+        count: 1,
+        truncated: false,
+        targets: [{ messageID: marker, preview: "question 2" }],
+      } : undefined,
+    })
+    internal.attempt!.client = {
+      session: {
+        revert: async (input: { messageID: string }) => {
+          marker = input.messageID
+          const updated = current()
+          internal.applyEvent(internal.attempt!, {
+            payload: { type: "session.updated", properties: { info: updated } },
+          } as never)
+          return { data: updated }
+        },
+      },
+    }
+
+    equal(await session.undoCurrentSession(), true)
+    equal(transcriptLoads, 0)
+    equal(internal.attempt!.reconciling, undefined)
+    equal(internal.attempt!.reconcileRequested, false)
+    equal(internal.attempt!.deferredBoundary, undefined)
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
+    equal(session.snapshot().rolledBack.count, 1)
+    equal(session.snapshot().phase, "ready")
+  })
+
   it("undoes and redoes user turns one step at a time", async () => {
     const session = controller("old")
     const internal = internals(session)
@@ -1439,6 +1593,176 @@ describe("native slash session mutations", () => {
     }
     equal(await session.redoCurrentSession(), false)
     equal(mutations, 0)
+  })
+
+  it("projects rolled-back prompts behind opaque keys and restores through the selected Core boundary", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    let marker: string | undefined = "user-2"
+    const reverted: string[] = []
+    let unreverted = 0
+    const current = () => ({ ...info("old", 10), ...(marker ? { revert: { messageID: marker } } : {}) })
+    internal.attempt!.client = {
+      session: {
+        get: async () => ({ data: current() }),
+        status: async () => ({ data: {} }),
+        messages: async () => ({ data: rawTurnHistory() }),
+        revert: async (input: { messageID: string }) => {
+          marker = input.messageID
+          reverted.push(input.messageID)
+          return { data: current() }
+        },
+        unrevert: async () => {
+          marker = undefined
+          unreverted++
+          return { data: current() }
+        },
+      },
+    }
+    const hydrated = await internal.loadStableSession(internal.attempt!, "old")
+    internal.transcript = hydrated.transcript
+    internal.installRolledBack(internal.attempt!, hydrated)
+    internal.flushRender()
+
+    const firstProjection = session.snapshot().rolledBack
+    equal(firstProjection.count, 2)
+    equal(firstProjection.truncated, false)
+    deepEqual(firstProjection.messages.map((message) => message.preview), ["question 2", "question 3"])
+    equal(firstProjection.messages.every((message) => /^[A-Za-z0-9_-]{16,128}$/.test(message.key)), true)
+    equal(JSON.stringify(firstProjection).includes("user-2"), false)
+    equal(JSON.stringify(firstProjection).includes("messageID"), false)
+    const firstKey = firstProjection.messages[0]!.key
+    const staleSecondKey = firstProjection.messages[1]!.key
+
+    equal(await session.restoreRolledBackMessage(firstKey), true)
+    deepEqual(reverted, ["user-3"])
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), [
+      "user-1", "user-2",
+    ])
+    equal(session.snapshot().rolledBack.count, 1)
+    equal(await session.restoreRolledBackMessage(staleSecondKey), false)
+    equal(await session.restoreRolledBackMessage(session.snapshot().rolledBack.messages[0]!.key), true)
+    equal(unreverted, 1)
+    equal(session.snapshot().rolledBack.count, 0)
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), [
+      "user-1", "user-2", "user-3",
+    ])
+  })
+
+  it("revalidates rollback boundaries before restoring", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    let marker = "user-2"
+    let mutations = 0
+    const current = () => ({ ...info("old", 10), revert: { messageID: marker } })
+    internal.attempt!.client = {
+      session: {
+        get: async () => ({ data: current() }),
+        status: async () => ({ data: {} }),
+        messages: async () => ({ data: rawTurnHistory() }),
+        revert: async () => { mutations++; return { data: current() } },
+        unrevert: async () => { mutations++; return { data: current() } },
+      },
+    }
+    const hydrated = await internal.loadStableSession(internal.attempt!, "old")
+    internal.transcript = hydrated.transcript
+    internal.installRolledBack(internal.attempt!, hydrated)
+    internal.flushRender()
+    const key = session.snapshot().rolledBack.messages[0]!.key
+
+    marker = "user-3"
+    equal(await session.restoreRolledBackMessage(key), false)
+    equal(mutations, 0)
+  })
+
+  it("serializes concurrent rollback restorations", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    let marker: string | undefined = "user-2"
+    let mutations = 0
+    const current = () => ({ ...info("old", 10), ...(marker ? { revert: { messageID: marker } } : {}) })
+    internal.attempt!.client = {
+      session: {
+        get: async () => ({ data: current() }),
+        status: async () => ({ data: {} }),
+        messages: async () => ({ data: rawTurnHistory() }),
+      },
+    }
+    const hydrated = await internal.loadStableSession(internal.attempt!, "old")
+    internal.transcript = hydrated.transcript
+    internal.installRolledBack(internal.attempt!, hydrated)
+    internal.flushRender()
+    const key = session.snapshot().rolledBack.messages[0]!.key
+    const firstGet = deferred<{ data: SessionInfo }>()
+    let gets = 0
+    internal.attempt!.client = {
+      session: {
+        get: async () => ++gets === 1 ? firstGet.promise : { data: current() },
+        status: async () => ({ data: {} }),
+        messages: async () => ({ data: rawTurnHistory() }),
+        revert: async (input: { messageID: string }) => {
+          mutations++
+          marker = input.messageID
+          return { data: current() }
+        },
+        unrevert: async () => {
+          mutations++
+          marker = undefined
+          return { data: current() }
+        },
+      },
+    }
+
+    const restoring = session.restoreRolledBackMessage(key)
+    equal(await session.restoreRolledBackMessage(key), false)
+    equal(mutations, 0)
+    firstGet.resolve({ data: current() })
+    equal(await restoring, true)
+    equal(mutations, 1)
+  })
+
+  it("bounds and sanitizes projected rollback previews", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const marker = "user-1"
+    const messages = Array.from({ length: 25 }, (_, offset) => {
+      const index = offset + 1
+      const messageID = `user-${index}`
+      return {
+        info: { id: messageID, sessionID: "old", role: "user" as const, time: { created: index } },
+        parts: [
+          { id: `mismatch-${index}`, messageID: "another-message", sessionID: "old", type: "text" as const, text: "SECRET" },
+          {
+            id: `part-${index}`,
+            messageID,
+            sessionID: "old",
+            type: "text" as const,
+            text: index === 1 ? `\u202e safe ${"long ".repeat(400)}` : `question ${index}`,
+          },
+        ],
+      }
+    })
+    const current = { ...info("old", 10), revert: { messageID: marker } }
+    internal.attempt!.client = {
+      session: {
+        get: async () => ({ data: current }),
+        status: async () => ({ data: {} }),
+        messages: async () => ({ data: messages }),
+      },
+    }
+    const hydrated = await internal.loadStableSession(internal.attempt!, "old")
+    internal.transcript = hydrated.transcript
+    internal.installRolledBack(internal.attempt!, hydrated)
+    internal.flushRender()
+
+    const projected = session.snapshot().rolledBack
+    equal(projected.count, 25)
+    equal(projected.truncated, true)
+    equal(projected.messages.length, 20)
+    equal(projected.messages[0]!.preview.length, 320)
+    equal(projected.messages[0]!.preview.endsWith("…"), true)
+    equal(projected.messages[0]!.preview.includes("\u202e"), false)
+    equal(projected.messages[0]!.preview.includes("SECRET"), false)
   })
 
   it("forks only from a current message and clears inherited revert state", async () => {
@@ -1719,6 +2043,9 @@ type ControllerInternals = {
     history?: SessionHistory
     pendingEvents?: { sessionID: string; generation: number; events: never[]; overflow: boolean }
     reconciling?: Promise<void>
+    reconcileRequested?: boolean
+    boundarySync?: Promise<void>
+    deferredBoundary?: { sessionID: string; messageID?: string }
     revertMessageID?: string
     sessionUsage?: UsageTotals
     events?: Promise<void>
@@ -1732,6 +2059,15 @@ type ControllerInternals = {
   applyEvent: (attempt: object, event: never) => void
   consumeEvents: (attempt: object, events: AsyncIterable<never>) => Promise<void>
   loadStableSession: (attempt: object, sessionID: string) => Promise<{ session: SessionInfo; transcript: Transcript }>
+  installRolledBack: (attempt: object, hydrated: {
+    session: SessionInfo
+    transcript: Transcript
+    rolledBack?: {
+      count: number
+      truncated: boolean
+      targets: Array<{ messageID: string; preview: string; createdAt?: number }>
+    }
+  }) => void
   loadTranscript: (attempt: object, sessionID: string) => Promise<Transcript>
   loadCatalog: (attempt: object) => Promise<Catalog>
   reloadProviderCatalog: (attempt: object, generation: number) => Promise<boolean>

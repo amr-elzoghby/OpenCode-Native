@@ -353,6 +353,8 @@ describe("Webview request protocol", () => {
       permissions: [],
       questions: [],
       activities: [],
+      turnUsage: [],
+      sessionUsage: {},
       workspace: true,
       trusted: true,
     }
