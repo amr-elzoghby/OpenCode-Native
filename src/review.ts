@@ -23,20 +23,6 @@ export type ReviewSummary = {
   }>
 }
 
-export type FileChangeInfo = {
-  id: string
-  sessionID: string
-  messageID: string
-  file: string
-  previousFile?: string
-  provenance: "direct" | "snapshot"
-  additions?: number
-  deletions?: number
-  reviewable: boolean
-  conflicted: boolean
-  overlapsDirect: boolean
-}
-
 export type FileDiff = {
   file?: string
   patch?: string
@@ -52,8 +38,7 @@ type Message = {
 
 type ReviewRecord = ReviewSummary & {
   messageID: string
-  targets: Map<string, { kind: "change"; changeID: string; path: string } | { kind: "diff"; path: string }>
-  identities: Map<string, string>
+  targets: Map<string, { kind: "diff"; path: string }>
 }
 
 export class ReviewStore {
@@ -69,38 +54,63 @@ export class ReviewStore {
     this.records.delete(messageID)
   }
 
-  upsert(message: Message) {
+  has(messageID: string) {
+    return this.records.has(messageID)
+  }
+
+  upsert(message: Message, touchedPaths?: string[], patchesAuthoritative = true) {
     if (message.role !== "user" || !safeID(message.id)) return
+    if (typeof message.summary !== "object" && touchedPaths === undefined) return
     const existing = this.records.get(message.id)
     const previous = new Map(existing?.files.map((file) => [file.path, file]))
     const paths = new Set<string>()
-    const files = (typeof message.summary === "object" ? message.summary.diffs : []).slice(0, MAX_REVIEW_FILES).flatMap((diff) => {
+    const touched = new Set((touchedPaths ?? []).slice(0, MAX_REVIEW_FILES).flatMap((value) => {
+      const path = safePath(value)
+      return path ? [path] : []
+    }))
+    const files: ReviewSummary["files"] = (typeof message.summary === "object" ? message.summary.diffs : []).slice(0, MAX_REVIEW_FILES).flatMap((diff) => {
       const path = safePath(diff.file)
       if (!path || paths.has(path) || !safeCount(diff.additions) || !safeCount(diff.deletions)) return []
       paths.add(path)
+      const toolTouched = touched.has(path)
+      const reviewable = !patchesAuthoritative || reviewDocument(diff, path) !== undefined
       return [{
         key: previous.get(path)?.key ?? this.createKey(),
         path,
         additions: diff.additions,
         deletions: diff.deletions,
-        provenance: "snapshot" as const,
-        reviewable: true,
+        provenance: toolTouched ? "direct" as const : "snapshot" as const,
+        reviewable,
         conflicted: false,
         overlapsDirect: false,
       } satisfies ReviewSummary["files"][number]]
+    })
+    touched.forEach((path) => {
+      if (paths.size >= MAX_REVIEW_FILES || paths.has(path)) return
+      paths.add(path)
+      files.push({
+        key: previous.get(path)?.key ?? this.createKey(),
+        path,
+        provenance: "direct",
+        reviewable: false,
+        conflicted: false,
+        overlapsDirect: false,
+      })
     })
     if (!files.length) {
       this.records.delete(message.id)
       return
     }
+    const kinds = new Set(files.map((file) => file.provenance))
     this.records.set(message.id, {
       key: existing?.key ?? this.createKey(),
       turnID: message.id,
       messageID: message.id,
-      attribution: "observed",
+      attribution: kinds.size > 1 ? "mixed" : kinds.has("direct") ? "direct" : "observed",
       files,
-      targets: new Map(files.map((file) => [file.key, { kind: "diff" as const, path: file.path }])),
-      identities: new Map(),
+      targets: new Map(files.flatMap((file) => file.reviewable
+        ? [[file.key, { kind: "diff" as const, path: file.path }] as const]
+        : [])),
     })
     while (this.records.size > MAX_REVIEW_TURNS) this.records.delete(this.records.keys().next().value!)
     while ([...this.records.values()].reduce((total, review) => total + review.files.length, 0) > MAX_REVIEW_TOTAL_FILES) {
@@ -125,57 +135,6 @@ export class ReviewStore {
     return target ? { messageID: review.messageID, ...target } : undefined
   }
 
-  upsertChanges(messageID: string, changes: FileChangeInfo[], sessionID: string) {
-    if (!safeID(messageID) || new Set(changes.map((change) => change.id)).size !== changes.length ||
-      changes.some((change) => change.sessionID !== sessionID || change.messageID !== messageID)) return false
-    const bounded = changes.slice(0, MAX_REVIEW_FILES)
-    const existing = this.records.get(messageID)
-    const previous = new Map([...(existing?.identities ?? [])].map(([key, id]) => [id, key]))
-    const targets = new Map<string, { kind: "change"; changeID: string; path: string }>()
-    const identities = new Map<string, string>()
-    const files = bounded.flatMap((change) => {
-      const path = safePath(change.file)
-      const previousPath = change.previousFile === undefined ? undefined : safePath(change.previousFile)
-      if (!path || (change.previousFile !== undefined && !previousPath) || !safeChangeID(change.id) ||
-        !optionalCount(change.additions) || !optionalCount(change.deletions) ||
-        (change.additions === undefined) !== (change.deletions === undefined) || typeof change.reviewable !== "boolean" ||
-        typeof change.conflicted !== "boolean" || typeof change.overlapsDirect !== "boolean" ||
-        !["direct", "snapshot"].includes(change.provenance)) return []
-      const key = previous.get(change.id) ?? this.createKey()
-      identities.set(key, change.id)
-      if (change.reviewable) targets.set(key, { kind: "change", changeID: change.id, path })
-      return [{
-        key,
-        path,
-        ...(previousPath ? { previousPath } : {}),
-        ...(change.additions === undefined ? {} : { additions: change.additions }),
-        ...(change.deletions === undefined ? {} : { deletions: change.deletions }),
-        provenance: change.provenance,
-        reviewable: change.reviewable,
-        conflicted: change.conflicted,
-        overlapsDirect: change.overlapsDirect,
-      } satisfies ReviewSummary["files"][number]]
-    })
-    if (!files.length) {
-      this.records.delete(messageID)
-      return true
-    }
-    const kinds = new Set(files.map((file) => file.provenance))
-    this.records.set(messageID, {
-      key: existing?.key ?? this.createKey(),
-      turnID: messageID,
-      messageID,
-      attribution: kinds.size > 1 ? "mixed" : kinds.has("direct") ? "direct" : "observed",
-      files,
-      targets,
-      identities,
-    })
-    while (this.records.size > MAX_REVIEW_TURNS) this.records.delete(this.records.keys().next().value!)
-    while ([...this.records.values()].reduce((total, review) => total + review.files.length, 0) > MAX_REVIEW_TOTAL_FILES) {
-      this.records.delete(this.records.keys().next().value!)
-    }
-    return true
-  }
 }
 
 export function reviewDocument(diff: FileDiff, expectedPath: string) {
@@ -232,14 +191,6 @@ function safeCount(value: number) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 10_000_000
 }
 
-function optionalCount(value: number | undefined) {
-  return value === undefined || safeCount(value)
-}
-
 function safeID(value: string) {
   return value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
-}
-
-function safeChangeID(value: string) {
-  return /^[A-Za-z0-9_-]{43}$/.test(value)
 }

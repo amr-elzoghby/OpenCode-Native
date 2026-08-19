@@ -248,6 +248,26 @@ describe("atomic session transitions", () => {
     deepEqual(session.snapshot().messages.map((message) => message.text), ["old prompt"])
   })
 
+  it("rejects a refresh when a queued session update changes the revert boundary", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const hydration = deferred<{ session: SessionInfo; transcript: Transcript }>()
+    internal.loadStableSession = async () => hydration.promise
+    internal.loadCatalog = async () => catalog("safe-model")
+
+    const refreshing = session.refresh()
+    internal.attempt!.pendingEvents!.events.push({
+      payload: {
+        type: "session.updated",
+        properties: { info: { ...info("old", 3), revert: { messageID: "user-2" } } },
+      },
+    } as never)
+    hydration.resolve({ session: info("old", 2), transcript: transcript("stale pre-revert") })
+
+    equal(await refreshing, false)
+    deepEqual(session.snapshot().messages.map((message) => message.text), ["old prompt"])
+  })
+
   it("discards late hydration after New Chat", async () => {
     const session = controller("old")
     const internal = internals(session)
@@ -304,6 +324,30 @@ describe("atomic session transitions", () => {
       payload: { type: "session.deleted", properties: { sessionID: "target" } },
     } as never)
     hydration.resolve({ session: target, transcript: transcript("deleted target") })
+    equal(await switching, false)
+    equal(internal.attempt?.sessionID, "old")
+    deepEqual(session.snapshot().messages.map((message) => message.text), ["old prompt"])
+  })
+
+  it("rejects a session switch when its queued session metadata changes during hydration", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const history = new SessionHistory("/workspace", () => "opaque_session_key_reverted_late")
+    const target = info("target", 2)
+    const key = history.replace([target], {}, undefined)[0]!.key
+    const hydration = deferred<{ session: SessionInfo; transcript: Transcript }>()
+    internal.attempt!.history = history
+    internal.loadStableSession = async () => hydration.promise
+
+    const switching = session.switchSession(key)
+    internal.attempt!.pendingEvents!.events.push({
+      payload: {
+        type: "session.updated",
+        properties: { info: { ...info("target", 3), revert: { messageID: "user-2" } } },
+      },
+    } as never)
+    hydration.resolve({ session: target, transcript: transcript("stale target") })
+
     equal(await switching, false)
     equal(internal.attempt?.sessionID, "old")
     deepEqual(session.snapshot().messages.map((message) => message.text), ["old prompt"])
@@ -642,7 +686,6 @@ describe("official usage event projection", () => {
         }] }),
       },
     }
-    internal.changeList = async () => ({ data: [] })
     const transcript = await internal.loadTranscript(internal.attempt!, "old")
     equal(transcript.snapshot()[0]?.response?.modelID, "safe-model")
     equal(transcript.turnUsageSnapshot()[0]?.tokens?.total, 8)
@@ -672,48 +715,73 @@ describe("official usage event projection", () => {
 })
 
 describe("native review session isolation", () => {
-  it("hydrates persisted authoritative change records after restart without session.diff", async () => {
+  it("hydrates official summary diffs and labels paths reported by completed edit tools", async () => {
     const session = controller("old")
     const internal = internals(session)
     internal.attempt!.client = {
       session: {
-        messages: async () => ({ data: [{
-          info: { id: "user-change", sessionID: "old", role: "user", time: { created: 1 } },
-          parts: [{ id: "part-user-change", sessionID: "old", messageID: "user-change", type: "text", text: "change it" }],
-        }] }),
+        messages: async () => ({ data: [
+          {
+            info: {
+              id: "user-change",
+              sessionID: "old",
+              role: "user",
+              time: { created: 1 },
+              summary: {
+                title: "change",
+                body: "change",
+                diffs: [{
+                  file: "src/a.ts",
+                  additions: 1,
+                  deletions: 1,
+                  patch: "@@ -1,1 +1,1 @@\n-old\n+new\n",
+                }],
+              },
+              agent: "build",
+              model: { providerID: "provider", modelID: "safe-model" },
+            },
+            parts: [{ id: "part-user-change", sessionID: "old", messageID: "user-change", type: "text", text: "change it" }],
+          },
+          {
+            info: {
+              id: "assistant-change",
+              sessionID: "old",
+              parentID: "user-change",
+              role: "assistant",
+              time: { created: 2, completed: 3 },
+              agent: "build",
+              providerID: "provider",
+              modelID: "safe-model",
+              mode: "build",
+              path: { cwd: "/workspace", root: "/workspace" },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            },
+            parts: [{
+              id: "tool-edit",
+              sessionID: "old",
+              messageID: "assistant-change",
+              type: "tool",
+              callID: "call-edit",
+              tool: "edit",
+              state: {
+                status: "completed",
+                input: { filePath: "/workspace/src/a.ts" },
+                output: "done",
+                title: "edit",
+                metadata: { filediff: { additions: 1, deletions: 1 } },
+                time: { start: 2, end: 3 },
+              },
+            }],
+          },
+        ] }),
       },
     }
-    internal.changeList = async () => ({ data: [fileChange("user-change")] })
     const transcript = await internal.loadTranscript(internal.attempt!, "old")
     const review = transcript.reviewSnapshot()[0]!
     equal(review.attribution, "direct")
     equal(review.files[0]!.path, "src/a.ts")
-  })
-
-  it("opens revalidated stored before and after content for authoritative changes", async () => {
-    const session = controller("old")
-    const internal = internals(session)
-    internal.transcript = turnTranscript("user-change", "assistant-change")
-    internal.transcript.setChanges("user-change", [fileChange("user-change")], "old")
-    internal.flushRender()
-    internal.changeDetail = async () => ({ data: { ...fileChange("user-change"), before: "old\n", after: "new\n" } })
-    const review = session.snapshot().reviews[0]!
-    deepEqual(await session.review(review.key, review.files[0]!.key), { path: "src/a.ts", before: "old\n", after: "new\n" })
-  })
-
-  it("rejects authoritative review content returned after the session changes", async () => {
-    const session = controller("old")
-    const internal = internals(session)
-    internal.transcript = turnTranscript("user-change", "assistant-change")
-    internal.transcript.setChanges("user-change", [fileChange("user-change")], "old")
-    internal.flushRender()
-    const response = deferred<{ data: ReturnType<typeof fileChange> & { before: string; after: string } }>()
-    internal.changeDetail = async () => response.promise
-    const review = session.snapshot().reviews[0]!
-    const opening = session.review(review.key, review.files[0]!.key)
-    session.newChat()
-    response.resolve({ data: { ...fileChange("user-change"), before: "old\n", after: "new\n" } })
-    await rejects(opening, /changed/)
+    equal(review.files[0]!.reviewable, true)
   })
 
   it("creates a one-file review from the originating user diff after idle reconciliation", async () => {
@@ -816,6 +884,63 @@ describe("native review session isolation", () => {
     equal(session.snapshot().phase, "ready")
   })
 
+  it("shows only a safe touched path when official snapshots return no diff", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const hydrated = turnTranscript("user-unavailable", "assistant-unavailable", "/workspace")
+    hydrated.setTool({
+      id: "tool-unavailable",
+      messageID: "assistant-unavailable",
+      tool: "write",
+      state: {
+        status: "completed",
+        input: { filePath: "/workspace/src/unavailable.ts", content: "must-not-cross" },
+        output: "must-not-cross",
+        time: { start: 2, end: 3 },
+      },
+    })
+    internal.transcript = hydrated
+    internal.loadTranscript = async () => hydrated
+    let calls = 0
+    internal.attempt!.client = { session: { diff: async () => {
+      calls++
+      return { data: [] }
+    } } }
+
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.idle", properties: { sessionID: "old" } },
+    } as never)
+    await internal.attempt!.reconciling
+
+    equal(calls, 4)
+    const review = session.snapshot().reviews[0]!
+    equal(review.files[0]!.path, "src/unavailable.ts")
+    equal(review.files[0]!.reviewable, false)
+    equal(JSON.stringify(session.snapshot()).includes("must-not-cross"), false)
+  })
+
+  it("preserves a hydrated official summary when transient diff requests fail", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const hydrated = reviewTranscript()
+    internal.transcript = hydrated
+    internal.loadTranscript = async () => hydrated
+    let calls = 0
+    internal.attempt!.client = { session: { diff: async () => {
+      calls++
+      throw new Error("temporary network failure")
+    } } }
+
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.idle", properties: { sessionID: "old" } },
+    } as never)
+    await internal.attempt!.reconciling
+
+    equal(calls, 4)
+    equal(session.snapshot().reviews[0]!.files[0]!.path, "src/a.ts")
+    equal(session.snapshot().reviews[0]!.files[0]!.reviewable, true)
+  })
+
   it("does not surface a late diff after New Chat changes the generation", async () => {
     const session = controller("old")
     const internal = internals(session)
@@ -876,6 +1001,33 @@ describe("native review session isolation", () => {
       patch: "Index: src/a.ts\n===\n--- src/a.ts\t\n+++ src/a.ts\t\n@@ -1,1 +1,1 @@\n-old\n+new\n",
     }] })
     await rejects(opening, /changed/)
+  })
+
+  it("rejects an in-flight review when undo changes the canonical snapshot boundary", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.transcript = reviewTranscript()
+    const response = deferred<{ data: Array<{ file: string; additions: number; deletions: number; patch: string }> }>()
+    internal.attempt!.client = { session: {
+      diff: async () => response.promise,
+      revert: async () => ({ data: { ...info("old", 2), revert: { messageID: "message-review" } } }),
+    } }
+    internal.loadStableSession = async () => ({
+      session: { ...info("old", 2), revert: { messageID: "message-review" } },
+      transcript: new Transcript("/workspace"),
+    })
+    internal.flushRender()
+    const review = session.snapshot().reviews[0]!
+    const opening = session.review(review.key, review.files[0]!.key)
+    const undo = session.undoCurrentSession()
+    response.resolve({ data: [{
+      file: "src/a.ts",
+      additions: 1,
+      deletions: 1,
+      patch: "Index: src/a.ts\n===\n--- src/a.ts\t\n+++ src/a.ts\t\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+    }] })
+    await rejects(opening, /changed/)
+    equal(await undo, true)
   })
 })
 
@@ -1002,21 +1154,61 @@ describe("MCP session isolation", () => {
 })
 
 describe("native slash session mutations", () => {
-  it("tracks revert state changed by another OpenCode client", () => {
+  it("reconciles transcript and reviews after another OpenCode client changes the revert boundary", async () => {
     const session = controller("old")
     const internal = internals(session)
+    internal.transcript = turnHistory(3)
+    internal.transcript.setReview("user-2", [{ file: "src/reverted.ts", additions: 1, deletions: 0 }])
+    internal.flushRender()
+    internal.loadTranscript = async () => visibleTurnHistory(internal.attempt?.revertMessageID)
     internal.applyEvent(internal.attempt!, {
       payload: {
         type: "session.updated",
         properties: { info: { ...info("old", 2), revert: { messageID: "user-2" } } },
       },
     } as never)
+    await internal.attempt!.reconciling
     equal(session.hasUndoneTurns(), true)
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
+    deepEqual(session.snapshot().reviews, [])
 
     internal.applyEvent(internal.attempt!, {
       payload: { type: "session.updated", properties: { info: info("old", 3) } },
     } as never)
+    await internal.attempt!.reconciling
     equal(session.hasUndoneTurns(), false)
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), [
+      "user-1", "user-2", "user-3",
+    ])
+  })
+
+  it("runs a queued external-revert reconcile after an unrelated chat mutation finishes", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.transcript = turnHistory(3)
+    internal.flushRender()
+    const shared = deferred<{ data: ReturnType<typeof info> & { share: { url: string } } }>()
+    let loads = 0
+    internal.loadTranscript = async () => {
+      loads++
+      return visibleTurnHistory(internal.attempt?.revertMessageID)
+    }
+    internal.attempt!.client = { session: { share: async () => shared.promise } }
+    const sharing = session.shareCurrentSession()
+
+    internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "session.updated",
+        properties: { info: { ...info("old", 2), revert: { messageID: "user-2" } } },
+      },
+    } as never)
+    equal(loads, 0)
+    shared.resolve({ data: { ...info("old", 3), share: { url: "https://share.opencode.ai/safe" } } })
+    equal(await sharing, "https://share.opencode.ai/safe")
+    await internal.attempt!.reconciling
+
+    equal(loads, 1)
+    deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
   })
 
   it("accepts only HTTPS or loopback HTTP share links", async () => {
@@ -1111,18 +1303,6 @@ describe("native slash session mutations", () => {
     }
     equal(await session.redoCurrentSession(), false)
     equal(mutations, 0)
-  })
-
-  it("does not attach authoritative changes to turns hidden by a revert", () => {
-    const session = controller("old")
-    const internal = internals(session)
-    internal.transcript = turnHistory(1)
-    internal.applyChanges(internal.transcript, [
-      { ...fileChange("user-1"), id: "A".repeat(43) },
-      { ...fileChange("user-2"), id: "B".repeat(43) },
-    ], "old")
-    internal.flushRender()
-    deepEqual(session.snapshot().reviews.map((review) => review.turnID), ["user-1"])
   })
 
   it("forks only from a current message and clears inherited revert state", async () => {
@@ -1398,7 +1578,6 @@ type ControllerInternals = {
     abort: AbortController
     connected: boolean
     client: object
-    transport?: object
     sessionID?: string
     catalog: Catalog
     history?: SessionHistory
@@ -1419,9 +1598,6 @@ type ControllerInternals = {
   loadTranscript: (attempt: object, sessionID: string) => Promise<Transcript>
   loadCatalog: (attempt: object) => Promise<Catalog>
   reloadProviderCatalog: (attempt: object, generation: number) => Promise<boolean>
-  applyChanges: (transcript: Transcript, changes: ReturnType<typeof fileChange>[], sessionID: string) => void
-  changeList: (attempt: object, sessionID: string, messageID?: string) => Promise<{ data?: ReturnType<typeof fileChange>[] } | undefined>
-  changeDetail: (attempt: object, sessionID: string, changeID: string) => Promise<{ data?: ReturnType<typeof fileChange> & { before: string; after: string } }>
   ensureSession: (attempt: object) => Promise<void>
   flushRender: () => void
 }
@@ -1491,15 +1667,23 @@ function reviewTranscript() {
       id: "message-review",
       role: "user",
       time: { created: 1 },
-      summary: { diffs: [{ file: "src/a.ts", additions: 1, deletions: 1, status: "modified" }] },
+      summary: {
+        diffs: [{
+          file: "src/a.ts",
+          additions: 1,
+          deletions: 1,
+          status: "modified",
+          patch: "@@ -1,1 +1,1 @@\n-old\n+new\n",
+        }],
+      },
     },
     parts: [{ id: "part-review", messageID: "message-review", text: "change it" }],
   }])
   return value
 }
 
-function turnTranscript(userID: string, assistantID: string) {
-  const value = new Transcript()
+function turnTranscript(userID: string, assistantID: string, directory?: string) {
+  const value = new Transcript(directory)
   value.replace([
     {
       info: { id: userID, role: "user", time: { created: 1 } },
@@ -1550,21 +1734,6 @@ function permissionRequest() {
     patterns: ["bun test"],
     always: ["bun test*"],
     metadata: {},
-  }
-}
-
-function fileChange(messageID: string) {
-  return {
-    id: "A".repeat(43),
-    sessionID: "old",
-    messageID,
-    file: "src/a.ts",
-    provenance: "direct" as const,
-    additions: 1,
-    deletions: 1,
-    reviewable: true,
-    conflicted: false,
-    overlapsDirect: false,
   }
 }
 

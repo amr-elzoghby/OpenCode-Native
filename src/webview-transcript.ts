@@ -600,7 +600,7 @@ function reviewCard(review: Review, open: (reviewKey: string, fileKey: string) =
   action.textContent = "Review"
   const first = review.files.find((file) => file.reviewable)
   action.disabled = !first
-  action.title = first ? "Open the first available native diff" : "Stored review content is unavailable"
+  action.title = first ? "Open the first available native diff" : "OpenCode snapshot review is unavailable"
   if (first) action.addEventListener("click", () => open(review.key, first.key))
   identity.prepend(cardIcon())
   header.append(identity, action)
@@ -611,7 +611,9 @@ function reviewCard(review: Review, open: (reviewKey: string, fileKey: string) =
     row.type = "button"
     row.className = "review-file"
     row.hidden = index >= 3
-    row.title = `Open native diff for ${file.path}`
+    row.title = file.reviewable
+      ? `Open native diff for ${file.path}`
+      : `OpenCode snapshot review is unavailable for ${file.path}`
     const path = document.createElement("span")
     path.className = "review-path"
     path.dir = "ltr"
@@ -620,8 +622,9 @@ function reviewCard(review: Review, open: (reviewKey: string, fileKey: string) =
     changes.className = "review-file-counts"
     if (file.additions !== undefined && file.deletions !== undefined) {
       changes.append(count("+", file.additions, "added"), document.createTextNode(" "), count("-", file.deletions, "removed"))
+      if (!file.reviewable) changes.append(document.createTextNode(" · text review unavailable"))
     } else {
-      changes.textContent = "Counts unavailable"
+      changes.textContent = "Snapshot review unavailable"
     }
     if (file.provenance === "snapshot") changes.append(document.createTextNode(" · observed"))
     if (file.conflicted) changes.append(document.createTextNode(" · conflict"))
@@ -651,11 +654,14 @@ function reviewCard(review: Review, open: (reviewKey: string, fileKey: string) =
 }
 
 function reviewLabel(review: Review) {
-  const direct = new Set(review.files.filter((file) => file.provenance === "direct").map((file) => file.path)).size
+  const changed = new Set(review.files.filter((file) => file.provenance === "direct" && file.reviewable).map((file) => file.path)).size
+  const touched = new Set(review.files.filter((file) => file.provenance === "direct" && !file.reviewable).map((file) => file.path)).size
   const observed = new Set(review.files.filter((file) => file.provenance === "snapshot").map((file) => file.path)).size
-  if (review.attribution === "direct") return `${direct} ${direct === 1 ? "file" : "files"} changed`
-  if (review.attribution === "observed") return `${observed} ${observed === 1 ? "file change" : "file changes"} observed`
-  return `${direct} ${direct === 1 ? "file" : "files"} changed · ${observed} observed`
+  return [
+    changed ? `${changed} ${changed === 1 ? "file" : "files"} changed` : "",
+    touched ? `${touched} ${touched === 1 ? "file" : "files"} touched` : "",
+    observed ? `${observed} ${observed === 1 ? "file change" : "file changes"} observed` : "",
+  ].filter(Boolean).join(" · ")
 }
 
 function cardIcon() {

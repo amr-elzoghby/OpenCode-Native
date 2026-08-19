@@ -170,6 +170,7 @@ describe("Native command wiring", () => {
     const protocol = readFileSync(join(root, "src", "protocol.ts"), "utf8")
     const webview = readFileSync(join(root, "src", "webview-transcript.ts"), "utf8")
     const editor = readFileSync(join(root, "src", "review-editor.ts"), "utf8")
+    const session = readFileSync(join(root, "src", "session.ts"), "utf8")
     equal(protocol.includes("patch?:"), false)
     equal(webview.includes(".patch"), false)
     equal(webview.includes("vscode.diff"), false)
@@ -182,6 +183,9 @@ describe("Native command wiring", () => {
     equal(webview.includes("before"), false)
     equal(webview.includes("after"), false)
     equal(webview.includes('"file changes"} observed'), true)
+    equal(session.includes("client.session.diff"), true)
+    equal(session.includes("/session/{sessionID}/change"), false)
+    equal(session.includes("changeDetail"), false)
   })
 
   it("keeps permission authority and raw request data out of the Webview", () => {

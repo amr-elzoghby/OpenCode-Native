@@ -18,25 +18,43 @@ describe("native diff review boundary", () => {
     })
   })
 
-  it("projects authoritative direct and observed records with host-only identities", () => {
+  it("combines official diffs with bounded paths from completed edit tools", () => {
     const store = new ReviewStore(keyFactory())
-    const directID = "A".repeat(43)
-    const observedID = "B".repeat(43)
-    equal(store.upsertChanges("message-review", [
-      change(directID, "src/a.ts", "direct", true, 2, 1),
-      change(observedID, "src/generated.ts", "snapshot", false),
-    ], "session-review"), true)
+    store.upsert(message([
+      diff("src/a.ts", 2, 1, patch("old\n", "new\n")),
+      diff("src/generated.ts", 1, 0, patch("", "generated\n")),
+    ]), ["src/a.ts", "src/unreviewable.ts", "../outside"])
     const review = store.snapshot()[0]!
     equal(review.attribution, "mixed")
-    equal(review.files[1]!.reviewable, false)
-    equal(JSON.stringify(review).includes(directID), false)
+    equal(review.files[0]!.provenance, "direct")
+    equal(review.files[1]!.provenance, "snapshot")
+    equal(review.files[2]!.path, "src/unreviewable.ts")
+    equal(review.files[2]!.reviewable, false)
     deepEqual(store.resolve(review.key, review.files[0]!.key), {
       messageID: "message-review",
-      kind: "change",
-      changeID: directID,
+      kind: "diff",
       path: "src/a.ts",
     })
-    equal(store.resolve(review.key, review.files[1]!.key), undefined)
+    equal(store.resolve(review.key, review.files[2]!.key), undefined)
+  })
+
+  it("does not erase an existing official review on a message update without summary data", () => {
+    const store = new ReviewStore(keyFactory())
+    store.upsert(message([diff("src/a.ts", 1, 0, patch("", "new\n"))]))
+    store.upsert({ id: "message-review", role: "user" })
+    equal(store.snapshot()[0]?.files[0]?.path, "src/a.ts")
+  })
+
+  it("disables full-file review for an authoritative binary or omitted patch", () => {
+    const store = new ReviewStore(keyFactory())
+    store.upsert(message([
+      diff("assets/icon.bin", 1, 1, ""),
+      { file: "src/partial.ts", additions: 1, deletions: 1, status: "modified", patch: "@@ -2,1 +2,1 @@\n-old\n+new\n" },
+    ]), [], true)
+    const review = store.snapshot()[0]!
+    equal(review.files.every((file) => !file.reviewable), true)
+    equal(review.files[0]!.additions, 1)
+    equal(store.resolve(review.key, review.files[0]!.key), undefined)
   })
 
   it("rejects unsafe paths, duplicate files, counts, and excess rows", () => {
@@ -85,21 +103,6 @@ function message(diffs: ReturnType<typeof diff>[]) {
 
 function diff(file: string, additions: number, deletions: number, value: string) {
   return { file, additions, deletions, status: "modified" as const, patch: value }
-}
-
-function change(id: string, file: string, provenance: "direct" | "snapshot", reviewable: boolean, additions?: number, deletions?: number) {
-  return {
-    id,
-    sessionID: "session-review",
-    messageID: "message-review",
-    file,
-    provenance,
-    ...(additions === undefined ? {} : { additions }),
-    ...(deletions === undefined ? {} : { deletions }),
-    reviewable,
-    conflicted: false,
-    overlapsDirect: false,
-  }
 }
 
 function patch(before: string, after: string) {

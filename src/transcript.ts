@@ -6,7 +6,7 @@ import {
 } from "./protocol"
 import { randomBytes } from "node:crypto"
 import path from "node:path"
-import { ReviewStore, type FileChangeInfo, type FileDiff, type ReviewSummary } from "./review"
+import { ReviewStore, type FileDiff, type ReviewSummary } from "./review"
 import {
   addCosts,
   addUsageTokens,
@@ -190,7 +190,7 @@ export class Transcript {
       const oldest = [...this.messages.values()].sort((a, b) => a.time.created - b.time.created)[0]
       if (oldest) this.removeMessage(oldest.id)
     }
-    this.reviews.upsert(info)
+    this.reviews.upsert(info, undefined, true)
     const completed = safeCompleted(info.time.completed, info.time.created)
     const usage = info.role === "assistant" ? projectUsage(info.cost, info.tokens) : {}
     const response = info.role === "assistant" ? compactResponse({
@@ -387,7 +387,8 @@ export class Transcript {
 
   replace(messages: Array<{ info: MessageInfo; parts: Array<TextPart | FilePart | ToolPart | ReasoningPart | StepFinishPart> }>) {
     this.clear()
-    messages.slice(-MAX_TRANSCRIPT_MESSAGES).forEach((message) => {
+    const bounded = messages.slice(-MAX_TRANSCRIPT_MESSAGES)
+    bounded.forEach((message) => {
       this.upsertMessage(message.info)
       message.parts.forEach((part) => {
         if ("type" in part && part.type === "reasoning") this.setReasoning(part)
@@ -396,6 +397,11 @@ export class Transcript {
         else if ("tool" in part) this.setTool(part)
         else this.setFile(part)
       })
+    })
+    bounded.forEach((message) => {
+      if (message.info.role === "user" && typeof message.info.summary === "object") {
+        this.setReview(message.info.id, message.info.summary.diffs, false, true)
+      }
     })
   }
 
@@ -451,20 +457,38 @@ export class Transcript {
     return this.reviews.snapshot()
   }
 
+  hasReview(messageID: string) {
+    return this.reviews.has(messageID)
+  }
+
   latestUserID() {
     return [...this.messages.values()]
       .filter((message) => message.role === "user")
       .sort((a, b) => b.time.created - a.time.created)[0]?.id
   }
 
-  setReview(messageID: string, diffs: FileDiff[]) {
+  setReview(messageID: string, diffs: FileDiff[], includeTouchedWithoutDiff = false, patchesAuthoritative = true) {
     const message = this.messages.get(messageID)
-    if (!message || message.role !== "user" || !diffs.length) return
-    this.reviews.upsert({ ...message, summary: { diffs } })
+    if (!message || message.role !== "user") return
+    const touched = this.toolTouchedPaths(messageID)
+    this.reviews.upsert(
+      { ...message, summary: { diffs } },
+      diffs.length || includeTouchedWithoutDiff ? touched : [],
+      patchesAuthoritative,
+    )
   }
 
-  setChanges(messageID: string, changes: FileChangeInfo[], sessionID: string) {
-    return this.reviews.upsertChanges(messageID, changes, sessionID)
+  private toolTouchedPaths(turnID: string) {
+    const paths = new Set<string>()
+    ;[...this.messages.values()]
+      .filter((message) => message.role === "assistant" && message.parentID === turnID)
+      .forEach((message) => {
+        this.activities.get(message.id)?.items.forEach((item) => {
+          if (item.kind !== "edit" || item.status !== "completed") return
+          item.files?.forEach((file) => paths.add(file.path))
+        })
+      })
+    return [...paths]
   }
 
   activitySnapshot(): TurnActivity[] {

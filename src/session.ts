@@ -24,7 +24,7 @@ import {
 } from "./protocol"
 import { SessionHistory, parseSession, proposedSessionTitle, sameSessionVersion, type SessionInfo } from "./session-history"
 import { Transcript, type TranscriptMessage, type TurnActivity } from "./transcript"
-import { MAX_REVIEW_FILES, reviewDocument, type ReviewSummary } from "./review"
+import { MAX_REVIEW_FILES, reviewDocument, type FileDiff, type ReviewSummary } from "./review"
 import { PermissionStore, type PermissionPrompt, type PermissionRequest } from "./permissions"
 import { QuestionStore, type QuestionAnswer, type QuestionPrompt, type QuestionRequest } from "./questions"
 import { CommandStore, type CommandSummary } from "./commands"
@@ -43,21 +43,6 @@ type Sdk = typeof import("@opencode-ai/sdk/v2/client", { with: { "resolution-mod
 type GlobalEvent = import("@opencode-ai/sdk/v2/client", { with: { "resolution-mode": "import" } }).GlobalEvent
 type Message = import("@opencode-ai/sdk/v2/client", { with: { "resolution-mode": "import" } }).Message
 type Part = import("@opencode-ai/sdk/v2/client", { with: { "resolution-mode": "import" } }).Part
-type TransportClient = ReturnType<typeof import("@opencode-ai/sdk/v2/gen/client", { with: { "resolution-mode": "import" } }).createClient>
-type FileChangeInfo = {
-  id: string
-  sessionID: string
-  messageID: string
-  file: string
-  previousFile?: string
-  provenance: "direct" | "snapshot"
-  additions?: number
-  deletions?: number
-  reviewable: boolean
-  conflicted: boolean
-  overlapsDirect: boolean
-}
-type FileChangeDetail = FileChangeInfo & { before: string; after: string }
 export type ConsoleOrganization = {
   accountID: string
   orgID: string
@@ -90,7 +75,6 @@ type Attempt = {
   connected: boolean
   server?: OwnedServer
   client?: Client
-  transport?: TransportClient
   sessionID?: string
   events?: Promise<void>
   eventAbort?: AbortController
@@ -99,6 +83,7 @@ type Attempt = {
   history?: SessionHistory
   pendingEvents?: { sessionID: string; generation: number; events: GlobalEvent[]; overflow: boolean }
   reconciling?: Promise<void>
+  reconcileRequested?: boolean
   reconciliationError?: string
   reviewMessageID?: string
   revertMessageID?: string
@@ -147,6 +132,7 @@ export class SessionController {
   private mutationBusy = false
   private permissionReplyBusy = false
   private questionReplyBusy = false
+  private reviewEpoch = 0
   private generation = 0
   private disposed = false
 
@@ -190,24 +176,13 @@ export class SessionController {
   async review(reviewKey: string, fileKey: string) {
     const permissionDocument = this.permissions.resolveReview(reviewKey, fileKey)
     if (permissionDocument) return permissionDocument
+    if (this.mutationBusy) throw new Error("Wait for the current chat change before opening its file review.")
     const attempt = this.attempt
     const sessionID = attempt?.sessionID
     const target = this.transcript.resolveReview(reviewKey, fileKey)
     if (!attempt?.client || !sessionID || !target) throw new Error("That file review is no longer available.")
     const generation = this.generation
-    if (target.kind === "change") {
-      const response = await this.changeDetail(attempt, sessionID, target.changeID)
-      const data = response.data
-      const current = this.transcript.resolveReview(reviewKey, fileKey)
-      if (
-        !data || data.id !== target.changeID || data.sessionID !== sessionID || data.messageID !== target.messageID ||
-        data.file !== target.path || typeof data.before !== "string" || typeof data.after !== "string" ||
-        data.before.length > 2_000_000 || data.after.length > 2_000_000 ||
-        this.attempt !== attempt || attempt.abort.signal.aborted || attempt.sessionID !== sessionID ||
-        this.generation !== generation || current?.kind !== "change" || current.changeID !== target.changeID
-      ) throw new Error("That file review changed before it could be opened.")
-      return { path: target.path, before: data.before, after: data.after }
-    }
+    const reviewEpoch = this.reviewEpoch
     const response = await attempt.client.session.diff(
       { sessionID, directory: attempt.directory, messageID: target.messageID },
       { signal: attempt.abort.signal },
@@ -217,6 +192,7 @@ export class SessionController {
       attempt.abort.signal.aborted ||
       attempt.sessionID !== sessionID ||
       this.generation !== generation ||
+      this.reviewEpoch !== reviewEpoch ||
       this.transcript.resolveReview(reviewKey, fileKey)?.path !== target.path
     ) throw new Error("That file review changed before it could be opened.")
     const matches = (response.data ?? []).slice(0, MAX_REVIEW_FILES).filter((diff) => normalizedDiffPath(diff.file) === target.path)
@@ -657,6 +633,7 @@ export class SessionController {
       attempt.sessionID = target.id
       attempt.reviewMessageID = undefined
       this.submissionTracker.clear()
+      this.reviewEpoch++
       this.transcript = hydrated.transcript
       attempt.revertMessageID = hydrated.session.revert?.messageID
       attempt.sessionUsage = hydrated.session.usage
@@ -851,6 +828,7 @@ export class SessionController {
         )
         attempt.reviewMessageID = undefined
         this.submissionTracker.clear()
+        this.reviewEpoch++
         this.transcript = hydrated.transcript
         this.permissions.clear()
         this.questions.clear()
@@ -910,6 +888,7 @@ export class SessionController {
         const selection = resolveSelection(catalog, selectionForSession(hydrated.session, this.state.selection))
         attempt.catalog = catalog
         this.commands.replace(availableCommands.data)
+        this.reviewEpoch++
         this.transcript = hydrated.transcript
         attempt.revertMessageID = hydrated.session.revert?.messageID
         attempt.sessionUsage = sessionUsageAfterEvents(
@@ -1189,10 +1168,7 @@ export class SessionController {
       throw new Error("OpenCode startup was cancelled.")
     }
     attempt.server = server
-    const [{ createOpencodeClient }, { createClient }] = await Promise.all([
-      import("@opencode-ai/sdk/v2/client"),
-      import("@opencode-ai/sdk/v2/gen/client"),
-    ])
+    const { createOpencodeClient } = await import("@opencode-ai/sdk/v2/client")
     if (attempt.abort.signal.aborted || this.attempt !== attempt) throw new Error("OpenCode startup was cancelled.")
     const client = createOpencodeClient({
       baseUrl: server.url,
@@ -1201,11 +1177,6 @@ export class SessionController {
       throwOnError: true,
     })
     attempt.client = client
-    attempt.transport = createClient({
-      baseUrl: server.url,
-      headers: { Authorization: server.authorization },
-      throwOnError: true,
-    })
 
     const catalogStarted = performance.now()
     const [catalog, availableCommands] = await Promise.all([
@@ -1273,6 +1244,7 @@ export class SessionController {
     attempt.sessionUsage = session.usage
     attempt.reviewMessageID = undefined
     this.timing(`session created in ${duration(started)}`)
+    this.reviewEpoch++
     this.transcript = new Transcript(attempt.directory)
     this.permissions.clear()
     this.questions.clear()
@@ -1310,14 +1282,20 @@ export class SessionController {
       const session = parseSession(payload.properties.info)
       attempt.history ??= new SessionHistory(attempt.directory)
       if (!session || session.id !== attempt.sessionID || !attempt.history.accepts(session)) return
+      const revertChanged = attempt.revertMessageID !== session.revert?.messageID
       attempt.revertMessageID = session.revert?.messageID
       attempt.sessionUsage = session.usage
-      this.renderSoon()
+      if (revertChanged) {
+        this.reviewEpoch++
+        attempt.reconcileRequested = true
+        if (!this.mutationBusy) void this.reconcile(attempt)
+      } else this.renderSoon()
       return
     }
     if (payload.type === "message.updated") {
       if (payload.properties.info.sessionID !== attempt.sessionID) return
       if (payload.properties.info.role === "user") attempt.reviewMessageID = payload.properties.info.id
+      this.reviewEpoch++
       this.upsertMessage(payload.properties.info)
       return
     }
@@ -1434,16 +1412,12 @@ export class SessionController {
 
   private async loadTranscript(attempt: Attempt, sessionID: string) {
     if (!attempt.client) throw new Error("OpenCode session is unavailable.")
-    const [response, changes] = await Promise.all([
-      attempt.client.session.messages(
-        { sessionID, directory: attempt.directory, limit: MAX_TRANSCRIPT_MESSAGES },
-        { signal: attempt.abort.signal },
-      ),
-      this.changeList(attempt, sessionID).catch(() => undefined),
-    ])
+    const response = await attempt.client.session.messages(
+      { sessionID, directory: attempt.directory, limit: MAX_TRANSCRIPT_MESSAGES },
+      { signal: attempt.abort.signal },
+    )
     const transcript = new Transcript(attempt.directory)
     transcript.replace(projectMessages(response.data, attempt.revertMessageID))
-    this.applyChanges(transcript, changes?.data, sessionID)
     return transcript
   }
 
@@ -1477,13 +1451,10 @@ export class SessionController {
     const before = parseSession(beforeResponse.data)
     if (!before || !attempt.history.accepts(before)) throw new Error("That OpenCode chat is outside this workspace.")
     if (sessionIsActive(beforeStatuses.data, sessionID)) throw new Error("That OpenCode chat is active in another client.")
-    const [messages, changes] = await Promise.all([
-      attempt.client.session.messages(
-        { sessionID, directory: attempt.directory, limit: MAX_TRANSCRIPT_MESSAGES },
-        { signal: attempt.abort.signal },
-      ),
-      this.changeList(attempt, sessionID).catch(() => undefined),
-    ])
+    const messages = await attempt.client.session.messages(
+      { sessionID, directory: attempt.directory, limit: MAX_TRANSCRIPT_MESSAGES },
+      { signal: attempt.abort.signal },
+    )
     const [afterResponse, afterStatuses] = await Promise.all([
       attempt.client.session.get(
         { sessionID, directory: attempt.directory },
@@ -1503,7 +1474,6 @@ export class SessionController {
     }
     const transcript = new Transcript(attempt.directory)
     transcript.replace(projectMessages(messages.data, after.revert?.messageID))
-    this.applyChanges(transcript, changes?.data, sessionID)
     return { session: after, transcript }
   }
 
@@ -1511,6 +1481,7 @@ export class SessionController {
     if (attempt.reconciling) return attempt.reconciling
     const sessionID = attempt.sessionID
     if (!sessionID) return Promise.resolve()
+    attempt.reconcileRequested = false
     const generation = this.generation
     const started = performance.now()
     const reconciling = Promise.all([
@@ -1525,6 +1496,7 @@ export class SessionController {
           attempt.sessionID !== sessionID ||
           this.generation !== generation
         ) return
+        this.reviewEpoch++
         this.transcript = transcript
         attempt.sessionUsage = sessionUsage
         transcript.snapshot().forEach((message) => {
@@ -1557,7 +1529,11 @@ export class SessionController {
         this.update({ phase: "error", error })
       })
       .finally(() => {
-        if (attempt.reconciling === reconciling) attempt.reconciling = undefined
+        if (attempt.reconciling !== reconciling) return
+        attempt.reconciling = undefined
+        if (attempt.reconcileRequested && this.attempt === attempt && !attempt.abort.signal.aborted && attempt.sessionID) {
+          void this.reconcile(attempt)
+        }
       })
     attempt.reconciling = reconciling
     return reconciling
@@ -1571,24 +1547,8 @@ export class SessionController {
     messageID: string,
   ) {
     if (!attempt.client || transcript.role(messageID) !== "user") return
-    let changeAPI = false
-    for (const index of Array.from({ length: REVIEW_DIFF_ATTEMPTS }, (_, value) => value)) {
-      if (!this.reviewIsCurrent(attempt, sessionID, generation, transcript)) return
-      const changes = await this.changeList(attempt, sessionID, messageID).catch(() => undefined)
-      if (Array.isArray(changes?.data)) {
-        changeAPI = true
-        if (changes.data.length && transcript.setChanges(messageID, changes.data, sessionID)) this.flushRender()
-        if (index < REVIEW_DIFF_ATTEMPTS - 1) await new Promise((resolve) => setTimeout(resolve, REVIEW_DIFF_RETRY_MS))
-        continue
-      }
-      break
-    }
-    if (changeAPI) {
-      if (this.reviewIsCurrent(attempt, sessionID, generation, transcript) && attempt.reviewMessageID === messageID) {
-        attempt.reviewMessageID = undefined
-      }
-      return
-    }
+    let receivedOfficialResponse = false
+    let diffs: FileDiff[] = []
     for (const index of Array.from({ length: REVIEW_DIFF_ATTEMPTS }, (_, value) => value)) {
       if (!this.reviewIsCurrent(attempt, sessionID, generation, transcript)) return
       const response = await attempt.client.session.diff(
@@ -1596,31 +1556,20 @@ export class SessionController {
         { signal: attempt.abort.signal },
       ).catch(() => undefined)
       if (!this.reviewIsCurrent(attempt, sessionID, generation, transcript)) return
-      if (response?.data?.length) {
-        transcript.setReview(messageID, response.data)
-        this.flushRender()
-        if (attempt.reviewMessageID === messageID) attempt.reviewMessageID = undefined
-        return
+      if (Array.isArray(response?.data)) {
+        receivedOfficialResponse = true
+        diffs = response.data
+        if (diffs.length) break
       }
       if (index < REVIEW_DIFF_ATTEMPTS - 1) await new Promise((resolve) => setTimeout(resolve, REVIEW_DIFF_RETRY_MS))
     }
-    if (this.reviewIsCurrent(attempt, sessionID, generation, transcript) && attempt.reviewMessageID === messageID) {
-      attempt.reviewMessageID = undefined
+    if (!this.reviewIsCurrent(attempt, sessionID, generation, transcript)) return
+    if (receivedOfficialResponse || !transcript.hasReview(messageID)) {
+      this.reviewEpoch++
+      transcript.setReview(messageID, diffs, diffs.length === 0, true)
+      this.flushRender()
     }
-  }
-
-  private applyChanges(transcript: Transcript, changes: FileChangeInfo[] | undefined, sessionID: string) {
-    if (!Array.isArray(changes)) return
-    const grouped = new Map<string, FileChangeInfo[]>()
-    changes.slice(0, 500).forEach((change) => {
-      if (!change || typeof change !== "object" || typeof change.messageID !== "string" || change.messageID.length > 512) return
-      const values = grouped.get(change.messageID) ?? []
-      values.push(change)
-      grouped.set(change.messageID, values)
-    })
-    grouped.forEach((values, messageID) => {
-      if (transcript.hasMessage(messageID)) transcript.setChanges(messageID, values, sessionID)
-    })
+    if (attempt.reviewMessageID === messageID) attempt.reviewMessageID = undefined
   }
 
   private async providerMethod(attempt: Attempt, providerID: string, methodIndex: number): Promise<ProviderMethod | undefined> {
@@ -1696,26 +1645,6 @@ export class SessionController {
 
   private currentAttempt(attempt: Attempt, generation: number) {
     return this.attempt === attempt && !attempt.abort.signal.aborted && this.generation === generation
-  }
-
-  private changeList(attempt: Attempt, sessionID: string, messageID?: string) {
-    if (!attempt.transport) return Promise.resolve(undefined)
-    return attempt.transport.get<{ 200: FileChangeInfo[] }>({
-      url: "/session/{sessionID}/change",
-      path: { sessionID },
-      query: { directory: attempt.directory, ...(messageID ? { messageID } : {}) },
-      signal: attempt.abort.signal,
-    })
-  }
-
-  private changeDetail(attempt: Attempt, sessionID: string, changeID: string) {
-    if (!attempt.transport) return Promise.resolve({ data: undefined })
-    return attempt.transport.get<{ 200: FileChangeDetail }>({
-      url: "/session/{sessionID}/change/{changeID}",
-      path: { sessionID, changeID },
-      query: { directory: attempt.directory },
-      signal: attempt.abort.signal,
-    })
   }
 
   private reviewIsCurrent(attempt: Attempt, sessionID: string, generation: number, transcript: Transcript) {
@@ -1827,10 +1756,15 @@ export class SessionController {
       return false
     }
     this.mutationBusy = true
+    this.reviewEpoch++
     try {
       return await operation()
     } finally {
       this.mutationBusy = false
+      const attempt = this.attempt
+      if (attempt?.reconcileRequested && !attempt.reconciling && attempt.sessionID && !attempt.abort.signal.aborted) {
+        void this.reconcile(attempt)
+      }
     }
   }
 
@@ -1993,6 +1927,7 @@ function sessionIsActive(value: unknown, sessionID: string) {
 }
 
 function eventSessionID(event: GlobalEvent) {
+  if (event.payload.type === "session.updated") return event.payload.properties.info.id
   if (event.payload.type === "message.updated") return event.payload.properties.info.sessionID
   if (event.payload.type === "message.part.updated") return event.payload.properties.part.sessionID
   const properties = record(record(event.payload)?.properties)
@@ -2073,7 +2008,7 @@ function sessionEndsActive(events: GlobalEvent[], sessionID: string) {
 function sessionInvalidated(events: GlobalEvent[], sessionID: string) {
   return sessionEndsActive(events, sessionID) || events.some((event) =>
     eventAffectsSession(event, sessionID) &&
-    (event.payload.type === "session.deleted" || event.payload.type === "session.error"),
+    (event.payload.type === "session.updated" || event.payload.type === "session.deleted" || event.payload.type === "session.error"),
   )
 }
 

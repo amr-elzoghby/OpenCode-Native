@@ -428,6 +428,7 @@ describe("streamed transcript", () => {
     } as Parameters<Transcript["upsertMessage"]>[0] & { providerData: { secret: string } })
 
     equal(transcript.reviewSnapshot()[0]?.files[0]?.path, "src/a.ts")
+    equal(transcript.reviewSnapshot()[0]?.files[0]?.reviewable, false)
     const retained = transcript as unknown as { messages: Map<string, unknown> }
     const serialized = JSON.stringify([...retained.messages.values()])
     equal(serialized.includes("raw-patch-must-not-be-retained"), false)
