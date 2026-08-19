@@ -1,0 +1,11 @@
+dist
+node_modules
+out
+.vscode/*
+!.vscode/launch.json
+!.vscode/tasks.json
+.vscode-test
+*.log
+.DS_Store
+images/screenshots/Screenshot *.png
+media/opencode-native-preview*.mp4
