@@ -208,6 +208,17 @@ describe("Native command wiring", () => {
     equal(host.includes("randomBytes(18)"), true)
   })
 
+  it("keeps rolled-back message identities and Core mutations in the Extension Host", () => {
+    const webview = readFileSync(join(root, "src", "webview-rollback.ts"), "utf8")
+    const host = readFileSync(join(root, "src", "session.ts"), "utf8")
+    equal(webview.includes("messageID"), false)
+    equal(webview.includes("sessionID"), false)
+    equal(webview.includes("innerHTML"), false)
+    equal(webview.includes("textContent = message.preview"), true)
+    equal(host.includes("boundaryMessageID"), true)
+    equal(host.includes("client.session.unrevert"), true)
+  })
+
   it("keeps multi-question prompts navigable and confirms before submission", () => {
     const webview = readFileSync(join(root, "src", "webview-questions.ts"), "utf8")
     equal(webview.includes("Question ${index + 1} of ${prompt.questions.length}"), true)

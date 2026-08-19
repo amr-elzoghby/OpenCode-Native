@@ -14,6 +14,9 @@ const MAX_ACTIVITY_TOTAL_CHARS = 512_000
 const MAX_COMMANDS = 200
 const MAX_PROVIDER_CONNECTIONS = 200
 const MAX_PROVIDER_METHODS = 10
+export const MAX_ROLLED_BACK_MESSAGES = 20
+export const MAX_ROLLED_BACK_PREVIEW_CHARS = 320
+const MAX_ROLLED_BACK_TOTAL_CHARS = MAX_ROLLED_BACK_MESSAGES * MAX_ROLLED_BACK_PREVIEW_CHARS
 export const MAX_TRANSCRIPT_MESSAGES = 200
 export const MAX_TRANSCRIPT_MESSAGE_CHARS = 256_000
 export const MAX_TRANSCRIPT_TOTAL_CHARS = 2_000_000
@@ -169,6 +172,11 @@ export type ViewState = {
   }>
   turnUsage: TurnUsage[]
   sessionUsage: UsageTotals
+  rolledBack: {
+    count: number
+    truncated: boolean
+    messages: Array<{ key: string; preview: string; createdAt?: number }>
+  }
   workspace: boolean
   trusted: boolean
   error?: string
@@ -177,6 +185,11 @@ export type ViewState = {
 export type StateMessage = { type: "state"; id: number; state: ViewState }
 export type ActionMessage = { type: "action"; action: NativeAction }
 export type ComposerMessage = { type: "composer"; text: string }
+export type RollbackResultMessage = {
+  type: "rollbackResult"
+  key: string
+  status: "restored" | "rejected"
+}
 export type HistoryMessage =
   | { type: "history"; status: "loading" | "closed"; sessions: [] }
   | { type: "history"; status: "ready"; sessions: HistorySession[] }
@@ -221,6 +234,7 @@ export type WebviewMessage =
   | { type: "selectSession"; key: string }
   | { type: "renameSession"; key: string; title: string }
   | { type: "deleteSession"; key: string }
+  | { type: "restoreRolledBack"; key: string }
   | { type: "attachmentAction"; action: AttachmentAction }
   | { type: "uploadFile"; name: string; mime: string; data: string }
   | { type: "removeAttachment"; id: string }
@@ -349,6 +363,9 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
   if (item.type === "deleteSession" && exactKeys(item, ["type", "key"]) && validOpaqueKey(item.key)) {
     return { type: "deleteSession", key: item.key }
   }
+  if (item.type === "restoreRolledBack" && exactKeys(item, ["type", "key"]) && validOpaqueKey(item.key)) {
+    return { type: "restoreRolledBack", key: item.key }
+  }
   if (
     item.type === "attachmentAction" &&
     exactKeys(item, ["type", "action"]) &&
@@ -445,6 +462,13 @@ export function parseComposerMessage(value: unknown): ComposerMessage | undefine
   return { type: "composer", text: item.text }
 }
 
+export function parseRollbackResultMessage(value: unknown): RollbackResultMessage | undefined {
+  const item = record(value)
+  if (!item || item.type !== "rollbackResult" || !exactKeys(item, ["type", "key", "status"]) ||
+    !validOpaqueKey(item.key) || (item.status !== "restored" && item.status !== "rejected")) return
+  return { type: "rollbackResult", key: item.key, status: item.status }
+}
+
 export function parseHistoryMessage(value: unknown): HistoryMessage | undefined {
   const item = record(value)
   if (!item || item.type !== "history" || !safeArray(item.sessions, isHistorySession) || (item.sessions as unknown[]).length > 200) return
@@ -515,7 +539,9 @@ export function parseStateMessage(value: unknown): StateMessage | undefined {
   const state = record(item.state)
   if (!state || !validPhase(state) || typeof state.trusted !== "boolean" || typeof state.workspace !== "boolean") return
   const stateKeys = ["phase", "messages", "commands", "agents", "providers", "models", "selection", "attachments", "reviews", "permissions", "questions", "activities", "turnUsage", "sessionUsage", "workspace", "trusted"]
-  if (!(exactKeys(state, stateKeys) || exactKeys(state, [...stateKeys, "error"]))) return
+  const stateKeysWithRollback = [...stateKeys, "rolledBack"]
+  if (!(exactKeys(state, stateKeys) || exactKeys(state, [...stateKeys, "error"]) ||
+    exactKeys(state, stateKeysWithRollback) || exactKeys(state, [...stateKeysWithRollback, "error"]))) return
   if (!safeArray(state.messages, isMessage) || (state.messages as unknown[]).length > MAX_TRANSCRIPT_MESSAGES) return
   if ((state.messages as ViewState["messages"]).reduce((total, message) => total + message.text.length, 0) > MAX_TRANSCRIPT_TOTAL_CHARS) return
   if (!safeArray(state.commands, isCommand) || (state.commands as unknown[]).length > MAX_COMMANDS) return
@@ -543,9 +569,11 @@ export function parseStateMessage(value: unknown): StateMessage | undefined {
   const messageTurns = new Set((state.messages as ViewState["messages"]).map((message) => message.turnID))
   const usageTurns = (state.turnUsage as ViewState["turnUsage"]).map((usage) => usage.turnID)
   if (usageTurns.some((turnID) => !messageTurns.has(turnID)) || new Set(usageTurns).size !== usageTurns.length) return
+  const rolledBack = state.rolledBack ?? { count: 0, truncated: false, messages: [] }
+  if (!isRolledBack(rolledBack)) return
   if (!isSelection(state.selection)) return
   if (!optionalString(state, "error")) return
-  return { type: "state", id: Number(item.id), state: state as ViewState }
+  return { type: "state", id: Number(item.id), state: { ...state, rolledBack } as ViewState }
 }
 
 function validRequestID(value: unknown): value is string {
@@ -579,6 +607,25 @@ function isMessage(value: unknown): value is ViewState["messages"][number] {
     (item.createdAt === undefined || (Number.isSafeInteger(item.createdAt) && Number(item.createdAt) >= 0 && Number(item.createdAt) <= 8_640_000_000_000_000)) &&
     (item.attachments === undefined || safeArray(item.attachments, (label) => safeString(label, 240))) &&
     (item.response === undefined || (item.role === "assistant" && isResponseMetadata(item.response, item.createdAt)))
+}
+
+function isRolledBack(value: unknown): value is ViewState["rolledBack"] {
+  const item = record(value)
+  if (!item || !exactKeys(item, ["count", "truncated", "messages"]) ||
+    !Number.isSafeInteger(item.count) || Number(item.count) < 0 || Number(item.count) > MAX_TRANSCRIPT_MESSAGES ||
+    typeof item.truncated !== "boolean" || !safeArray(item.messages, isRolledBackMessage) ||
+    (item.messages as unknown[]).length > MAX_ROLLED_BACK_MESSAGES) return false
+  const messages = item.messages as ViewState["rolledBack"]["messages"]
+  if (messages.length > Number(item.count) || item.truncated !== (Number(item.count) > messages.length)) return false
+  if (new Set(messages.map((message) => message.key)).size !== messages.length) return false
+  return messages.reduce((total, message) => total + message.preview.length, 0) <= MAX_ROLLED_BACK_TOTAL_CHARS
+}
+
+function isRolledBackMessage(value: unknown): value is ViewState["rolledBack"]["messages"][number] {
+  const item = record(value)
+  if (!item || !(exactKeys(item, ["key", "preview"]) || exactKeys(item, ["key", "preview", "createdAt"]))) return false
+  return validOpaqueKey(item.key) && safeString(item.preview, MAX_ROLLED_BACK_PREVIEW_CHARS) && item.preview.length > 0 &&
+    (item.createdAt === undefined || (Number.isSafeInteger(item.createdAt) && Number(item.createdAt) >= 0 && Number(item.createdAt) <= 8_640_000_000_000_000))
 }
 
 function isCommand(value: unknown): value is ViewState["commands"][number] {

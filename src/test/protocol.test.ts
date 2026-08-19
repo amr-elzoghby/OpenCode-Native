@@ -1,5 +1,7 @@
 import { deepEqual, equal } from "node:assert/strict"
 import {
+  MAX_ROLLED_BACK_MESSAGES,
+  MAX_ROLLED_BACK_PREVIEW_CHARS,
   MAX_TRANSCRIPT_MESSAGE_CHARS,
   MAX_TRANSCRIPT_MESSAGES,
   MAX_TRANSCRIPT_TOTAL_CHARS,
@@ -8,6 +10,7 @@ import {
   parseComposerMessage,
   parseHistoryMessage,
   parseProviderConnectMessage,
+  parseRollbackResultMessage,
   parseStateMessage,
   parseSubmissionMessage,
   parseWebviewMessage,
@@ -102,6 +105,24 @@ describe("Webview request protocol", () => {
       sessions: [{ key, title: "Safe chat", updated: 100, current: true, status: "idle" }],
     })?.sessions[0], { key, title: "Safe chat", updated: 100, current: true, status: "idle" })
     equal(parseHistoryMessage({ type: "history", status: "ready", sessions: [{ key, title: "Bad" }] }), undefined)
+  })
+
+  it("accepts only opaque rollback restoration keys", () => {
+    const key = "opaque_rollback_key_1234"
+    deepEqual(parseWebviewMessage({ type: "restoreRolledBack", key }), { type: "restoreRolledBack", key })
+    equal(parseWebviewMessage({ type: "restoreRolledBack", key: "user-2" }), undefined)
+    equal(parseWebviewMessage({ type: "restoreRolledBack", key, messageID: "user-2" }), undefined)
+    deepEqual(parseRollbackResultMessage({ type: "rollbackResult", key, status: "restored" }), {
+      type: "rollbackResult",
+      key,
+      status: "restored",
+    })
+    deepEqual(parseRollbackResultMessage({ type: "rollbackResult", key, status: "rejected" }), {
+      type: "rollbackResult",
+      key,
+      status: "rejected",
+    })
+    equal(parseRollbackResultMessage({ type: "rollbackResult", key, status: "rejected", messageID: "user-2" }), undefined)
   })
 
   it("keeps provider connection selections opaque and bounded", () => {
@@ -315,6 +336,80 @@ describe("Webview request protocol", () => {
     })
     equal(message?.state.selection.model?.modelID, "gpt-safe")
     equal(message?.state.messages[0]?.turnID, "message-1")
+    deepEqual(message?.state.rolledBack, { count: 0, truncated: false, messages: [] })
+  })
+
+  it("accepts only bounded rolled-back message projections", () => {
+    const base = {
+      phase: "ready",
+      messages: [],
+      commands: [],
+      agents: [],
+      providers: [],
+      models: [],
+      selection: {},
+      attachments: [],
+      reviews: [],
+      permissions: [],
+      questions: [],
+      activities: [],
+      workspace: true,
+      trusted: true,
+    }
+    const rolledBack = {
+      count: 2,
+      truncated: false,
+      messages: [
+        { key: "opaque_rollback_key_1234", preview: "First hidden prompt", createdAt: 1_700_000_000_000 },
+        { key: "opaque_rollback_key_5678", preview: "ثاني رسالة" },
+      ],
+    }
+    deepEqual(
+      parseStateMessage({ type: "state", id: 11, state: { ...base, rolledBack } })?.state.rolledBack,
+      rolledBack,
+    )
+    equal(parseStateMessage({
+      type: "state",
+      id: 12,
+      state: { ...base, rolledBack: { ...rolledBack, messages: [{ ...rolledBack.messages[0], messageID: "user-2" }] } },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state",
+      id: 13,
+      state: { ...base, rolledBack: { count: 2, truncated: true, messages: rolledBack.messages } },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state",
+      id: 14,
+      state: { ...base, rolledBack: { count: 2, truncated: false, messages: [rolledBack.messages[0], rolledBack.messages[0]] } },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state",
+      id: 15,
+      state: {
+        ...base,
+        rolledBack: {
+          count: MAX_ROLLED_BACK_MESSAGES + 1,
+          truncated: true,
+          messages: Array.from({ length: MAX_ROLLED_BACK_MESSAGES + 1 }, (_, index) => ({
+            key: `opaque_rollback_key_${index}`,
+            preview: "prompt",
+          })),
+        },
+      },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state",
+      id: 16,
+      state: {
+        ...base,
+        rolledBack: {
+          count: 1,
+          truncated: false,
+          messages: [{ key: "opaque_rollback_key_9999", preview: "x".repeat(MAX_ROLLED_BACK_PREVIEW_CHARS + 1) }],
+        },
+      },
+    }), undefined)
   })
 
   it("accepts only explicit bounded response, turn, session, and context-limit fields", () => {

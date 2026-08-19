@@ -8,7 +8,8 @@ import { createPermissions } from "./webview-permissions"
 import { createQuestions } from "./webview-questions"
 import { createProviderConnect } from "./webview-connect"
 import { createUsage } from "./webview-usage"
-import { parseActionMessage, parseComposerMessage, parseStateMessage, parseSubmissionMessage, type NativeAction, type ViewState } from "./protocol"
+import { createRollbackDock } from "./webview-rollback"
+import { parseActionMessage, parseComposerMessage, parseRollbackResultMessage, parseStateMessage, parseSubmissionMessage, type NativeAction, type ViewState } from "./protocol"
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void }
 
@@ -27,6 +28,7 @@ const attachmentMenu = required<HTMLElement>("#attachment-menu")
 const emptyBrand = required<HTMLElement>("#empty-brand")
 const permissionRoot = required<HTMLElement>("#permission-dock")
 const questionRoot = required<HTMLElement>("#question-dock")
+const rollbackRoot = required<HTMLElement>("#rollback-dock")
 const providerConnectRoot = required<HTMLElement>("#provider-connect")
 const status = required<HTMLElement>("#status")
 const announcer = required<HTMLElement>("#announcer")
@@ -65,11 +67,11 @@ const history = createHistory(historyRoot, {
   select: (key) => vscode.postMessage({ type: "selectSession", key }),
   rename: (key, title) => vscode.postMessage({ type: "renameSession", key, title }),
   delete: (key) => vscode.postMessage({ type: "deleteSession", key }),
-}, [transcriptShell, composer])
+}, [transcriptShell, composer, rollbackRoot])
 const timeline = createTimeline(
   timelineRoot,
   (turnID) => transcriptView.scrollToTurn(turnID),
-  [transcriptShell, composer, permissionRoot, questionRoot],
+  [transcriptShell, composer, permissionRoot, questionRoot, rollbackRoot],
 )
 const attachments = createAttachments(
   attachmentStrip,
@@ -94,6 +96,11 @@ const questions = createQuestions(
   (key, answers) => vscode.postMessage({ type: "replyQuestion", key, answers }),
   (key) => vscode.postMessage({ type: "rejectQuestion", key }),
 )
+const rollback = createRollbackDock(
+  rollbackRoot,
+  (key) => vscode.postMessage({ type: "restoreRolledBack", key }),
+  (message) => { announcer.textContent = message },
+)
 const providerConnect = createProviderConnect(providerConnectRoot, {
   activate: () => {
     history.close()
@@ -102,7 +109,7 @@ const providerConnect = createProviderConnect(providerConnectRoot, {
   close: () => vscode.postMessage({ type: "providerConnectClose" }),
   provider: (key) => vscode.postMessage({ type: "selectProviderConnection", key }),
   method: (key) => vscode.postMessage({ type: "selectProviderMethod", key }),
-}, [transcriptShell, composer, permissionRoot, questionRoot])
+}, [transcriptShell, composer, permissionRoot, questionRoot, rollbackRoot])
 
 composer.addEventListener("submit", (event) => {
   event.preventDefault()
@@ -159,6 +166,11 @@ window.addEventListener("message", (event) => {
     resizePrompt()
     commands.sync()
     prompt.focus()
+    return
+  }
+  const rollbackResult = parseRollbackResultMessage(event.data)
+  if (rollbackResult) {
+    rollback.resolve(rollbackResult.key, rollbackResult.status)
     return
   }
   const submission = parseSubmissionMessage(event.data)
@@ -274,6 +286,7 @@ function render(state: ViewState) {
   )
   permissions.update(state.permissions)
   questions.update(state.questions)
+  rollback.update(state.rolledBack, controlsDisabled)
   send.disabled = backendUnavailable || state.phase === "starting" || state.phase === "syncing" || state.phase === "stopping" || (!generating && !state.selection.model)
   send.classList.toggle("stop", generating)
   send.textContent = generating ? "■" : "↑"

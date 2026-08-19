@@ -15,6 +15,8 @@ import {
   type Selection,
 } from "./catalog"
 import {
+  MAX_ROLLED_BACK_MESSAGES,
+  MAX_ROLLED_BACK_PREVIEW_CHARS,
   MAX_TRANSCRIPT_DELTA_CHARS,
   MAX_TRANSCRIPT_MESSAGE_CHARS,
   MAX_TRANSCRIPT_MESSAGES,
@@ -65,7 +67,26 @@ export type SessionState = {
   providers: ProviderOption[]
   models: ModelOption[]
   selection: Selection
+  rolledBack: RolledBackState
   error?: string
+}
+
+type RolledBackState = {
+  count: number
+  truncated: boolean
+  messages: Array<{ key: string; preview: string; createdAt?: number }>
+}
+
+type RolledBackProjection = {
+  count: number
+  truncated: boolean
+  targets: Array<{ messageID: string; preview: string; createdAt?: number }>
+}
+
+type RolledBackTarget = {
+  sessionID: string
+  boundaryMessageID: string
+  messageID: string
 }
 
 type Client = ReturnType<Sdk["createOpencodeClient"]>
@@ -84,6 +105,7 @@ type Attempt = {
   pendingEvents?: { sessionID: string; generation: number; events: GlobalEvent[]; overflow: boolean }
   reconciling?: Promise<void>
   reconcileRequested?: boolean
+  boundarySync?: Promise<void>
   reconciliationError?: string
   reviewMessageID?: string
   revertMessageID?: string
@@ -97,6 +119,7 @@ const MAX_QUEUED_MESSAGE_EVENT_CHARS = 64_000
 type HydratedSession = {
   session: SessionInfo
   transcript: Transcript
+  rolledBack?: RolledBackProjection
 }
 
 export class SessionController {
@@ -114,11 +137,14 @@ export class SessionController {
     providers: [],
     models: [],
     selection: {},
+    rolledBack: emptyRolledBackState(),
   }
   private transcript = new Transcript()
   private permissions = new PermissionStore()
   private questions = new QuestionStore()
   private commands = new CommandStore()
+  private rolledBack = emptyRolledBackState()
+  private rolledBackTargets = new Map<string, RolledBackTarget>()
   private listeners = new Set<(state: SessionState) => void>()
   private submissionListeners = new Set<(event: SubmissionEvent) => void>()
   private submissionTracker: SubmissionTracker
@@ -174,6 +200,7 @@ export class SessionController {
   }
 
   async review(reviewKey: string, fileKey: string) {
+    if (this.mutationBusy || this.transitioning) throw new Error("That file review is changing. Try again when chat history is ready.")
     const permissionDocument = this.permissions.resolveReview(reviewKey, fileKey)
     if (permissionDocument) return permissionDocument
     if (this.mutationBusy) throw new Error("Wait for the current chat change before opening its file review.")
@@ -637,6 +664,7 @@ export class SessionController {
       this.transcript = hydrated.transcript
       attempt.revertMessageID = hydrated.session.revert?.messageID
       attempt.sessionUsage = hydrated.session.usage
+      this.installRolledBack(attempt, hydrated)
       this.permissions.clear()
       this.questions.clear()
       this.state = {
@@ -655,7 +683,7 @@ export class SessionController {
       const sessionID = attempt?.sessionID
       const messageID = this.transcript.latestUserID()
       if (!attempt?.client || !sessionID || !messageID) return false
-      const generation = this.generation
+      const generation = ++this.generation
       const response = await attempt.client.session.revert(
         { sessionID, directory: attempt.directory, messageID },
         { signal: attempt.abort.signal },
@@ -676,7 +704,7 @@ export class SessionController {
       const attempt = this.attempt
       const sessionID = attempt?.sessionID
       if (!attempt?.client || !sessionID) return false
-      const generation = this.generation
+      const generation = ++this.generation
       const current = await attempt.client.session.get(
         { sessionID, directory: attempt.directory },
         { signal: attempt.abort.signal },
@@ -709,6 +737,76 @@ export class SessionController {
     }, "Wait for the current OpenCode response before restoring an undone turn.")
   }
 
+  restoreRolledBackMessage(key: string) {
+    return this.mutate(async () => {
+      const target = this.rolledBackTargets.get(key)
+      const attempt = this.attempt
+      const sessionID = attempt?.sessionID
+      if (!target || !attempt?.client || !sessionID || target.sessionID !== sessionID) return false
+      const generation = ++this.generation
+      attempt.history ??= new SessionHistory(attempt.directory)
+      const [beforeResponse, beforeStatuses] = await Promise.all([
+        attempt.client.session.get(
+          { sessionID, directory: attempt.directory },
+          { signal: attempt.abort.signal },
+        ),
+        attempt.client.session.status(
+          { directory: attempt.directory },
+          { signal: attempt.abort.signal },
+        ),
+      ])
+      const before = parseSession(beforeResponse.data)
+      if (!before || !attempt.history.accepts(before) || before.id !== sessionID ||
+        before.revert?.messageID !== target.boundaryMessageID || sessionIsActive(beforeStatuses.data, sessionID) ||
+        !this.currentAttempt(attempt, generation) || attempt.sessionID !== sessionID) return false
+      const messages = await attempt.client.session.messages(
+        { sessionID, directory: attempt.directory, limit: MAX_TRANSCRIPT_MESSAGES },
+        { signal: attempt.abort.signal },
+      )
+      if (!this.currentAttempt(attempt, generation) || attempt.sessionID !== sessionID) return false
+      const [afterResponse, afterStatuses] = await Promise.all([
+        attempt.client.session.get(
+          { sessionID, directory: attempt.directory },
+          { signal: attempt.abort.signal },
+        ),
+        attempt.client.session.status(
+          { directory: attempt.directory },
+          { signal: attempt.abort.signal },
+        ),
+      ])
+      const after = parseSession(afterResponse.data)
+      if (!after || !attempt.history.accepts(after) || after.id !== sessionID ||
+        after.revert?.messageID !== target.boundaryMessageID || !sameSessionVersion(before, after) ||
+        sessionIsActive(afterStatuses.data, sessionID) ||
+        !this.currentAttempt(attempt, generation) || attempt.sessionID !== sessionID) return false
+      const all = (messages.data ?? []).slice(-MAX_TRANSCRIPT_MESSAGES)
+      const boundaryIndex = all.findIndex((message) =>
+        message.info.id === target.boundaryMessageID && message.info.sessionID === sessionID && message.info.role === "user"
+      )
+      if (boundaryIndex < 0) return false
+      const hidden = rolledBackUserMessages(all, boundaryIndex, sessionID)
+      const targetIndex = hidden.findIndex((message) =>
+        message.info.id === target.messageID
+      )
+      if (targetIndex < 0) return false
+      const next = hidden[targetIndex + 1]
+      const response = next
+        ? await attempt.client.session.revert(
+            { sessionID, directory: attempt.directory, messageID: next.info.id },
+            { signal: attempt.abort.signal },
+          )
+        : await attempt.client.session.unrevert(
+            { sessionID, directory: attempt.directory },
+            { signal: attempt.abort.signal },
+          )
+      const restored = parseSession(response.data)
+      if (!restored || restored.id !== sessionID || !attempt.history.accepts(restored) ||
+        (next ? restored.revert?.messageID !== next.info.id : !!restored.revert) ||
+        !this.currentAttempt(attempt, generation) || attempt.sessionID !== sessionID) return false
+      return this.reloadAfterHistoryMutation(attempt, sessionID, generation)
+    }, "Wait for the current OpenCode response before restoring a rolled-back message.")
+  }
+
   newChat() {
     if (this.promptBusy || this.mutationBusy) return false
     const attempt = this.attempt
@@ -722,6 +820,7 @@ export class SessionController {
     this.generation++
     this.submissionTracker.clear()
     this.transcript = new Transcript(attempt?.directory)
+    this.clearRolledBack()
     this.flushRender()
     this.update({ phase: attempt?.client ? "ready" : "idle", error: undefined })
     return true
@@ -830,6 +929,7 @@ export class SessionController {
         this.submissionTracker.clear()
         this.reviewEpoch++
         this.transcript = hydrated.transcript
+        this.installRolledBack(attempt, hydrated)
         this.permissions.clear()
         this.questions.clear()
         this.state = { ...this.state, selection }
@@ -894,6 +994,7 @@ export class SessionController {
         attempt.sessionUsage = sessionUsageAfterEvents(
           attempt.pendingEvents?.events ?? [], sessionID, hydrated.session.usage,
         )
+        this.installRolledBack(attempt, hydrated)
         this.permissions.clear()
         this.questions.clear()
         this.state = {
@@ -1246,6 +1347,7 @@ export class SessionController {
     this.timing(`session created in ${duration(started)}`)
     this.reviewEpoch++
     this.transcript = new Transcript(attempt.directory)
+    this.clearRolledBack()
     this.permissions.clear()
     this.questions.clear()
     this.flushRender()
@@ -1283,13 +1385,31 @@ export class SessionController {
       attempt.history ??= new SessionHistory(attempt.directory)
       if (!session || session.id !== attempt.sessionID || !attempt.history.accepts(session)) return
       const revertChanged = attempt.revertMessageID !== session.revert?.messageID
+      if (revertChanged) {
+        const sessionID = session.id
+        attempt.revertMessageID = session.revert?.messageID
+        attempt.sessionUsage = session.usage
+        attempt.reviewMessageID = undefined
+        attempt.reconciliationError = undefined
+        attempt.reconcileRequested = true
+        this.submissionTracker.clear()
+        this.reviewEpoch++
+        this.transcript = new Transcript(attempt.directory)
+        this.clearRolledBack()
+        this.permissions.clear()
+        this.questions.clear()
+        this.state = { ...this.state, phase: "syncing", error: undefined }
+        this.flushRender()
+        if (!this.mutationBusy) {
+          attempt.reconcileRequested = false
+          const generation = ++this.generation
+          this.syncHistoryBoundary(attempt, sessionID, generation)
+        }
+        return
+      }
       attempt.revertMessageID = session.revert?.messageID
       attempt.sessionUsage = session.usage
-      if (revertChanged) {
-        this.reviewEpoch++
-        attempt.reconcileRequested = true
-        if (!this.mutationBusy) void this.reconcile(attempt)
-      } else this.renderSoon()
+      this.renderSoon()
       return
     }
     if (payload.type === "message.updated") {
@@ -1449,7 +1569,9 @@ export class SessionController {
       ),
     ])
     const before = parseSession(beforeResponse.data)
-    if (!before || !attempt.history.accepts(before)) throw new Error("That OpenCode chat is outside this workspace.")
+    if (!before || before.id !== sessionID || !attempt.history.accepts(before)) {
+      throw new Error("That OpenCode chat is outside this workspace.")
+    }
     if (sessionIsActive(beforeStatuses.data, sessionID)) throw new Error("That OpenCode chat is active in another client.")
     const messages = await attempt.client.session.messages(
       { sessionID, directory: attempt.directory, limit: MAX_TRANSCRIPT_MESSAGES },
@@ -1466,15 +1588,21 @@ export class SessionController {
       ),
     ])
     const after = parseSession(afterResponse.data)
-    if (!after || !attempt.history.accepts(after)) throw new Error("That OpenCode chat is outside this workspace.")
+    if (!after || after.id !== sessionID || !attempt.history.accepts(after)) {
+      throw new Error("That OpenCode chat is outside this workspace.")
+    }
     if (sessionIsActive(afterStatuses.data, sessionID)) throw new Error("That OpenCode chat is active in another client.")
-    if (!sameSessionVersion(before, after)) {
+    if (!sameSessionVersion(before, after) || before.revert?.messageID !== after.revert?.messageID) {
       if (retry) return this.loadStableSession(attempt, sessionID, false)
       throw new Error("That OpenCode chat changed while it was loading.")
     }
     const transcript = new Transcript(attempt.directory)
     transcript.replace(projectMessages(messages.data, after.revert?.messageID))
-    return { session: after, transcript }
+    return {
+      session: after,
+      transcript,
+      rolledBack: projectRolledBackMessages(messages.data, after.revert?.messageID, sessionID),
+    }
   }
 
   private reconcile(attempt: Attempt, reviewMessageID?: string) {
@@ -1540,6 +1668,24 @@ export class SessionController {
       })
     attempt.reconciling = reconciling
     return reconciling
+  }
+
+  private syncHistoryBoundary(attempt: Attempt, sessionID: string, generation: number) {
+    const syncing = this.reloadAfterHistoryMutation(attempt, sessionID, generation)
+      .then((changed) => {
+        if (!changed && this.currentAttempt(attempt, generation) && attempt.sessionID === sessionID) {
+          this.update({ phase: "error", error: "OpenCode chat history changed and could not be refreshed safely." })
+        }
+      })
+      .catch(() => {
+        if (this.currentAttempt(attempt, generation) && attempt.sessionID === sessionID) {
+          this.update({ phase: "error", error: "OpenCode chat history changed and could not be refreshed safely." })
+        }
+      })
+      .finally(() => {
+        if (attempt.boundarySync === syncing) attempt.boundarySync = undefined
+      })
+    attempt.boundarySync = syncing
   }
 
   private async loadReview(
@@ -1675,17 +1821,50 @@ export class SessionController {
       activities: this.transcript.activitySnapshot(),
       turnUsage: this.transcript.turnUsageSnapshot(),
       sessionUsage: this.attempt?.sessionUsage ?? {},
+      rolledBack: this.rolledBack,
     })
+  }
+
+  private installRolledBack(attempt: Attempt, hydrated: HydratedSession) {
+    const boundaryMessageID = hydrated.session.revert?.messageID
+    const projected = hydrated.rolledBack
+    if (!boundaryMessageID || !projected?.count) {
+      this.clearRolledBack()
+      return
+    }
+    const targets = new Map<string, RolledBackTarget>()
+    const messages = projected.targets.map((target) => {
+      const key = uniqueRollbackKey(targets)
+      targets.set(key, {
+        sessionID: hydrated.session.id,
+        boundaryMessageID,
+        messageID: target.messageID,
+      })
+      return {
+        key,
+        preview: target.preview,
+        ...(target.createdAt === undefined ? {} : { createdAt: target.createdAt }),
+      }
+    })
+    this.rolledBackTargets = targets
+    this.rolledBack = { count: projected.count, truncated: projected.truncated, messages }
+    attempt.revertMessageID = boundaryMessageID
+  }
+
+  private clearRolledBack() {
+    this.rolledBackTargets.clear()
+    this.rolledBack = emptyRolledBackState()
   }
 
   private cleanupAttempt(attempt?: Attempt) {
     if (!attempt) return Promise.resolve()
     if (attempt.cleanup) return attempt.cleanup
     attempt.abort.abort()
-    attempt.cleanup = Promise.allSettled([attempt.events, attempt.server?.close()]).then((results) => {
+    attempt.cleanup = Promise.allSettled([attempt.events, attempt.boundarySync, attempt.server?.close()]).then((results) => {
       if (this.attempt === attempt) {
         this.attempt = undefined
         this.transcript.clear()
+        this.clearRolledBack()
         this.permissions.clear()
         this.questions.clear()
         this.commands.clear()
@@ -1782,6 +1961,7 @@ export class SessionController {
     attempt.reconciliationError = undefined
     this.submissionTracker.clear()
     this.transcript.clear()
+    this.clearRolledBack()
     this.permissions.clear()
     this.questions.clear()
     this.flushRender()
@@ -1796,6 +1976,10 @@ export class SessionController {
     this.transcript = hydrated.transcript
     attempt.revertMessageID = hydrated.session.revert?.messageID
     attempt.sessionUsage = hydrated.session.usage
+    this.installRolledBack(attempt, hydrated)
+    this.promptBusy = false
+    this.firstTextPending = false
+    this.firstTextStarted = undefined
     this.permissions.clear()
     this.questions.clear()
     this.flushRender()
@@ -1922,6 +2106,86 @@ function projectMessages(messages: Array<{ info: Message; parts: Part[] }> | und
       (part.type === "text" && !part.synthetic && !part.ignored),
     ),
   }))
+}
+
+function projectRolledBackMessages(
+  messages: Array<{ info: Message; parts: Part[] }> | undefined,
+  revertMessageID?: string,
+  sessionID?: string,
+): RolledBackProjection {
+  if (!revertMessageID || !sessionID) return { count: 0, truncated: false, targets: [] }
+  const all = (messages ?? []).slice(-MAX_TRANSCRIPT_MESSAGES)
+  const boundary = all.findIndex((message) =>
+    message.info.id === revertMessageID && message.info.sessionID === sessionID && message.info.role === "user"
+  )
+  if (boundary < 0) return { count: 0, truncated: false, targets: [] }
+  const hidden = rolledBackUserMessages(all, boundary, sessionID)
+  const targets = hidden.slice(0, MAX_ROLLED_BACK_MESSAGES).map((message) => {
+    const preview = rolledBackPreview(message)
+    const created = message.info.time?.created
+    const createdAt = Number.isSafeInteger(created) && created >= 0 && created <= 8_640_000_000_000_000
+      ? created
+      : undefined
+    return {
+      messageID: message.info.id,
+      preview,
+      ...(createdAt === undefined ? {} : { createdAt }),
+    }
+  })
+  return { count: hidden.length, truncated: hidden.length > targets.length, targets }
+}
+
+function rolledBackUserMessages(
+  messages: Array<{ info: Message; parts: Part[] }>,
+  boundary: number,
+  sessionID: string,
+) {
+  const seen = new Set<string>()
+  return messages.slice(boundary).filter((message) => {
+    if (message.info.sessionID !== sessionID || message.info.role !== "user" ||
+      !safeCoreRecordID(message.info.id) || seen.has(message.info.id)) return false
+    seen.add(message.info.id)
+    return true
+  })
+}
+
+function rolledBackPreview(message: { info: Message; parts: Part[] }) {
+  const inputLimit = MAX_ROLLED_BACK_PREVIEW_CHARS * 4
+  let joined = ""
+  for (const part of message.parts.slice(0, 1_000)) {
+    if (part.type !== "text" || part.synthetic || part.ignored || part.messageID !== message.info.id ||
+      part.sessionID !== message.info.sessionID ||
+      typeof part.text !== "string") continue
+    const separator = joined ? " " : ""
+    const available = inputLimit - joined.length - separator.length
+    if (available <= 0) break
+    joined += separator + part.text.slice(0, available)
+  }
+  const normalized = joined
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+  if (!normalized) return "Message with attachments"
+  return normalized.length > MAX_ROLLED_BACK_PREVIEW_CHARS
+    ? `${normalized.slice(0, MAX_ROLLED_BACK_PREVIEW_CHARS - 1)}…`
+    : normalized
+}
+
+function safeCoreRecordID(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
+}
+
+function uniqueRollbackKey(targets: Map<string, RolledBackTarget>) {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const key = randomBytes(18).toString("base64url")
+    if (!targets.has(key)) return key
+  }
+  throw new Error("OpenCode could not create a safe rolled-back message key.")
+}
+
+function emptyRolledBackState(): RolledBackState {
+  return { count: 0, truncated: false, messages: [] }
 }
 
 function sessionIsActive(value: unknown, sessionID: string) {

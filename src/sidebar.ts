@@ -22,6 +22,7 @@ import {
   type HistorySession,
   type NativeAction,
   type ProviderConnectMessage,
+  type RollbackResultMessage,
   type SubmissionMessage,
   type ViewState,
   type WebviewMessage,
@@ -320,6 +321,21 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       await this.session.stop()
       return
     }
+    if (message.type === "restoreRolledBack") {
+      let status: RollbackResultMessage["status"] = "rejected"
+      try {
+        const changed = await this.session.restoreRolledBackMessage(message.key)
+        if (changed) status = "restored"
+        if (!changed && !this.session.snapshot().error) {
+          this.session.reportError("That rolled-back message changed before it could be restored. Refresh and try again.")
+        }
+      } catch {
+        this.session.reportError("OpenCode could not restore that rolled-back message safely. Refresh and try again.")
+      }
+      await this.postRollbackResult({ type: "rollbackResult", key: message.key, status })
+      await this.postState()
+      return
+    }
     if (message.type === "selectSession") {
       this.attachmentGeneration++
       this.attachments?.clear()
@@ -471,6 +487,10 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     return this.view?.webview.postMessage(message)
   }
 
+  private postRollbackResult(message: RollbackResultMessage) {
+    return this.view?.webview.postMessage(message)
+  }
+
   private postHistory(message: HistoryMessage) {
     return this.view?.webview.postMessage(message)
   }
@@ -514,6 +534,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       activities: snapshot.activities,
       turnUsage: snapshot.turnUsage,
       sessionUsage: snapshot.sessionUsage,
+      rolledBack: snapshot.rolledBack,
     } satisfies ViewState
     return view.webview.postMessage({
       type: "state",
@@ -1141,7 +1162,7 @@ function html(webview: Webview, script: Uri, language: string) {
         font: var(--vscode-font-size)/1.5 var(--vscode-font-family);
       }
       button, select, textarea { font: inherit; }
-      main { position: relative; height: 100vh; height: 100dvh; display: grid; grid-template-rows: minmax(0, 1fr) auto auto auto; }
+      main { position: relative; height: 100vh; height: 100dvh; display: grid; grid-template-rows: minmax(0, 1fr) auto auto auto auto; }
       .history { position: absolute; z-index: 50; inset: 0; display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr); padding: 8px 9px; background: color-mix(in srgb, var(--vscode-sideBar-background) 97%, transparent); }
       .history > header { display: flex; align-items: center; justify-content: space-between; min-height: 32px; padding: 0 3px 5px; }
       .history h2 { margin: 0; font-size: 13px; font-weight: 600; }
@@ -1277,6 +1298,22 @@ function html(webview: Webview, script: Uri, language: string) {
       .question-cancel { margin-inline-end: auto; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
       .question-back { color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); }
       .question-next { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+      #rollback-dock { margin: 0 8px 7px; overflow: hidden; border: 1px solid var(--vscode-widget-border); border-radius: 9px; background: color-mix(in srgb, var(--vscode-editorWidget-background) 76%, transparent); box-shadow: 0 4px 13px var(--vscode-widget-shadow); }
+      .rollback-summary { width: 100%; min-height: 34px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 10px; border: 0; color: var(--vscode-foreground); background: transparent; text-align: start; cursor: pointer; }
+      .rollback-summary:hover { background: var(--vscode-toolbar-hoverBackground); }
+      .rollback-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+      .rollback-chevron { width: 7px; height: 7px; margin: -3px 3px 0; border-inline-end: 1px solid var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-descriptionForeground); transform: rotate(45deg); }
+      .rollback-summary[aria-expanded="true"] .rollback-chevron { margin-top: 3px; transform: rotate(225deg); }
+      .rollback-hint { display: none; padding: 0 10px 7px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+      .rollback-summary[aria-expanded="true"] + .rollback-hint { display: block; }
+      .rollback-list { max-height: min(190px, 28vh); overflow-y: auto; border-top: 1px solid var(--vscode-widget-border); }
+      .rollback-item { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 7px 9px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-widget-border) 62%, transparent); }
+      .rollback-content { min-width: 0; display: grid; gap: 2px; }
+      .rollback-preview { display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; unicode-bidi: plaintext; }
+      .rollback-time { color: var(--vscode-descriptionForeground); font-size: 10px; direction: ltr; unicode-bidi: isolate; }
+      .rollback-restore { min-height: 27px; padding: 3px 9px; border: 1px solid var(--vscode-button-border, var(--vscode-widget-border)); border-radius: 6px; color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); cursor: pointer; white-space: nowrap; }
+      .rollback-restore:hover:not(:disabled) { border-color: var(--opencode-accent-border); background: var(--vscode-button-secondaryHoverBackground); }
+      .rollback-omitted { margin: 0; padding: 7px 9px; color: var(--vscode-descriptionForeground); font-size: 10px; }
       .markdown { line-height: 1.58; overflow-wrap: anywhere; unicode-bidi: plaintext; }
       .markdown + .markdown { margin-top: 10px; }
       .markdown > :first-child { margin-top: 0; }
@@ -1391,6 +1428,9 @@ function html(webview: Webview, script: Uri, language: string) {
       .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
       @media (max-width: 260px) {
         form { margin-inline: 6px; padding-inline: 7px; }
+        #rollback-dock { margin-inline: 6px; }
+        .rollback-item { grid-template-columns: minmax(0, 1fr); }
+        .rollback-restore { justify-self: end; white-space: normal; }
         .controls {
           grid-template-columns: auto minmax(0, 1fr) auto auto;
           grid-template-areas:
@@ -1433,6 +1473,7 @@ function html(webview: Webview, script: Uri, language: string) {
       </div>
       <section id="permission-dock" aria-live="polite" aria-label="OpenCode permission request" hidden></section>
       <section id="question-dock" aria-live="polite" aria-label="OpenCode question" hidden></section>
+      <section id="rollback-dock" aria-live="polite" aria-label="Rolled-back OpenCode messages" hidden></section>
       <form id="composer">
         <div class="command-menu" id="command-menu" hidden></div>
         <div class="attachment-strip" id="attachment-strip" aria-label="Context attachments" hidden></div>
