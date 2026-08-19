@@ -26,7 +26,7 @@ Use OpenCode from a native VS Code sidebar while keeping the OpenCode CLI, provi
 
 ## Chat tokens and message history
 
-Use the token button beside History to see the total tokens recorded by OpenCode in the current conversation. Response details also show the model, agent, timing, turn tokens, and estimated cost when OpenCode provides them.
+Use the token button beside History to see the exact total reported by OpenCode for the current conversation, including input, output, reasoning, and cache tokens across every model request. Response details also show the model, agent, timing, turn tokens, and estimated cost when OpenCode provides them.
 
 After undoing one or more turns, a collapsed **Rolled-back messages** dock appears above the composer. Expand it to restore a specific prompt through OpenCode's official session history—without keeping a second copy of the conversation in the extension.
 

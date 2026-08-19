@@ -12,11 +12,20 @@ const command = {
 describe("dynamic OpenCode command authority", () => {
   it("projects bounded display metadata without exposing templates", () => {
     const store = new CommandStore()
-    store.replace([command, { ...command, name: "skill-name", source: "skill", template: "private skill body" }])
+    store.replace([
+      { ...command, name: "init", description: "guided setup", template: "private init body" },
+      command,
+      { ...command, name: "search-docs", source: "mcp", template: "private MCP body" },
+      { ...command, name: "skill-name", source: "skill", template: "private skill body" },
+    ])
     deepEqual(store.snapshot().map((item) => ({ name: item.name, source: item.source })), [
+      { name: "init", source: "command" },
       { name: "review", source: "command" },
+      { name: "search-docs", source: "mcp" },
       { name: "skill-name", source: "skill" },
     ])
+    equal(JSON.stringify(store.snapshot()).includes("private init body"), false)
+    equal(JSON.stringify(store.snapshot()).includes("private MCP body"), false)
     equal(JSON.stringify(store.snapshot()).includes("private skill body"), false)
     equal(JSON.stringify(store.snapshot()).includes("Review $ARGUMENTS"), false)
   })

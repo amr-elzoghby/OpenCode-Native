@@ -35,9 +35,6 @@ export function createUsage(root: HTMLElement, restoreFocus: () => void) {
   close.setAttribute("aria-label", "Close chat token details")
   close.textContent = "×"
   header.append(title, close)
-  const note = document.createElement("p")
-  note.className = "usage-note"
-  note.textContent = "Total tokens recorded by OpenCode in this conversation."
   root.append(panel)
 
   close.addEventListener("click", () => setOpen(false, true))
@@ -65,11 +62,14 @@ export function createUsage(root: HTMLElement, restoreFocus: () => void) {
         setOpen(false)
         return
       }
-      const pair = document.createElement("div")
-      pair.className = "usage-pair"
-      pair.dir = "ltr"
-      pair.textContent = `${formatTokens(session.tokens?.total)} tokens`
-      panel.replaceChildren(header, pair, note)
+      const total = document.createElement("div")
+      total.className = "usage-pair"
+      total.dir = "ltr"
+      total.textContent = `${formatTokens(session.tokens?.total)} tokens`
+      const note = document.createElement("p")
+      note.className = "usage-note"
+      note.textContent = "Exact total reported by OpenCode for this chat, including input, output, reasoning, and cache tokens across every model request."
+      panel.replaceChildren(header, total, note)
     },
   }
 

@@ -1402,7 +1402,7 @@ function html(webview: Webview, script: Uri, language: string) {
       .usage-close { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 5px; color: var(--vscode-icon-foreground); background: transparent; cursor: pointer; font-size: 18px; }
       .usage-close:hover { color: var(--opencode-accent); background: var(--vscode-toolbar-hoverBackground); }
       .usage-pair { padding: 8px; border: 1px solid var(--vscode-widget-border); border-radius: 6px; color: var(--opencode-accent); background: var(--vscode-editor-background); text-align: center; font: 600 13px/1.4 var(--vscode-editor-font-family); unicode-bidi: isolate; }
-      .usage-note { margin: 8px 1px 10px; color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.45; text-align: start; unicode-bidi: plaintext; }
+      .usage-note { margin: 5px 1px 0; color: var(--vscode-descriptionForeground); font-size: 10px; line-height: 1.45; text-align: start; unicode-bidi: plaintext; }
       .usage-details h3 { margin: 0 0 7px; font-size: 11px; }
       .usage-details h3:not(:first-child) { margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--vscode-widget-border); }
       .picker-search { width: 100%; height: 28px; margin-bottom: 4px; padding: 0 7px; border: 1px solid var(--vscode-input-border); border-radius: 4px; outline: 0; color: var(--vscode-input-foreground); background: var(--vscode-input-background); }
