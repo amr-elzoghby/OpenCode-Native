@@ -6,6 +6,7 @@ export function createRollbackDock(
   root: HTMLElement,
   restore: (key: string) => void,
   announce?: (message: string) => void,
+  focusFallback?: () => void,
 ) {
   const summary = document.createElement("button")
   summary.type = "button"
@@ -51,22 +52,24 @@ export function createRollbackDock(
   return {
     update(next: RolledBack, nextDisabled: boolean) {
       const nextSignature = next.messages.map((message) => message.key).join("\u0000")
-      if (nextSignature !== signature) {
+      const changed = nextSignature !== signature
+      if (changed) {
         signature = nextSignature
         expanded = false
-        pendingKey = undefined
       }
       disabled = nextDisabled
       value = next
-      render()
+      render(changed)
     },
     resolve(key: string, status: "restored" | "rejected") {
       if (pendingKey !== key) return false
-      if (status === "rejected") pendingKey = undefined
+      pendingKey = undefined
       announce?.(status === "restored"
         ? "Rolled-back message restored."
         : "Rolled-back message was not restored.")
-      render()
+      render(false)
+      if (root.hidden) focusFallback?.()
+      else summary.focus()
       return true
     },
   }
@@ -78,27 +81,33 @@ export function createRollbackDock(
     list.hidden = !expanded
   }
 
-  function render() {
+  function render(rebuild = true) {
     root.hidden = value.count === 0
     root.setAttribute("aria-busy", String(pendingKey !== undefined))
     if (!value.count) {
       expanded = false
       summary.setAttribute("aria-expanded", "false")
       list.hidden = true
-      list.replaceChildren()
+      if (rebuild) list.replaceChildren()
       return
     }
     label.textContent = `${value.count} rolled back ${value.count === 1 ? "message" : "messages"}`
     summary.title = expanded ? "Collapse rolled-back messages" : "Show rolled-back messages"
     summary.setAttribute("aria-expanded", String(expanded))
     list.hidden = !expanded
-    list.replaceChildren(...value.messages.map((message, index) => row(message, index)))
-    if (value.truncated) {
-      const omitted = document.createElement("p")
-      omitted.className = "rollback-omitted"
-      omitted.setAttribute("role", "listitem")
-      omitted.textContent = `${value.count - value.messages.length} older rolled-back messages are not shown.`
-      list.append(omitted)
+    if (rebuild) {
+      list.replaceChildren(...value.messages.map((message, index) => row(message, index)))
+      if (value.truncated) {
+        const omitted = document.createElement("p")
+        omitted.className = "rollback-omitted"
+        omitted.setAttribute("role", "listitem")
+        omitted.textContent = `${value.count - value.messages.length} newer rolled-back messages are not shown.`
+        list.append(omitted)
+      }
+    } else {
+      list.querySelectorAll<HTMLButtonElement>("button").forEach((button) => {
+        button.disabled = disabled || pendingKey !== undefined
+      })
     }
   }
 

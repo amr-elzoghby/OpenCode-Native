@@ -218,6 +218,56 @@ describe("atomic session transitions", () => {
     equal(session.snapshot().selection.model?.modelID, "new-model")
   })
 
+  it("invalidates stale refresh hydration and reconciles a queued external rollback boundary", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const stale = deferred<{ session: SessionInfo; transcript: Transcript }>()
+    const streamEnd = deferred<void>()
+    let hydrations = 0
+    internal.loadStableSession = async () => {
+      hydrations++
+      if (hydrations === 1) return stale.promise
+      return {
+        session: { ...info("old", 10), revert: { messageID: "user-2" } },
+        transcript: transcript("authoritative visible turn"),
+        rolledBack: {
+          count: 2,
+          truncated: false,
+          targets: [
+            { messageID: "user-2", preview: "question 2" },
+            { messageID: "user-3", preview: "question 3" },
+          ],
+        },
+      }
+    }
+    internal.loadCatalog = async () => internal.attempt!.catalog
+    async function* boundaryEvents() {
+      yield {
+        payload: {
+          type: "session.updated",
+          properties: { info: { ...info("old", 10), revert: { messageID: "user-2" } } },
+        },
+      } as never
+      await streamEnd.promise
+    }
+
+    const refreshing = session.refresh()
+    const consuming = internal.consumeEvents(internal.attempt!, boundaryEvents())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    equal(internal.attempt!.pendingEvents?.events.length, 1)
+    stale.resolve({ session: info("old", 10), transcript: transcript("stale visible turn") })
+
+    equal(await refreshing, false)
+    await internal.attempt!.boundarySync
+    deepEqual(session.snapshot().messages.map((message) => message.text), ["authoritative visible turn"])
+    equal(session.snapshot().rolledBack.count, 2)
+    equal(internal.attempt!.revertMessageID, "user-2")
+
+    internal.attempt!.abort.abort()
+    streamEnd.resolve()
+    await consuming
+  })
+
   it("refuses busy refresh and preserves state on failure", async () => {
     const session = controller("old")
     const internal = internals(session)
@@ -1254,6 +1304,47 @@ describe("native slash session mutations", () => {
 
     equal(loads, 1)
     deepEqual(session.snapshot().messages.filter((message) => message.role === "user").map((message) => message.id), ["user-1"])
+  })
+
+  it("defers an external rollback boundary during an unrelated mutation, then reconciles it", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const shared = deferred<{ data: SessionInfo & { share: { url: string } } }>()
+    internal.attempt!.client = {
+      session: {
+        share: async () => shared.promise,
+      },
+    }
+    internal.loadStableSession = async () => ({
+      session: { ...info("old", 10), revert: { messageID: "user-2" } },
+      transcript: transcript("authoritative visible turn"),
+      rolledBack: {
+        count: 2,
+        truncated: false,
+        targets: [
+          { messageID: "user-2", preview: "question 2" },
+          { messageID: "user-3", preview: "question 3" },
+        ],
+      },
+    })
+
+    const sharing = session.shareCurrentSession()
+    internal.applyEvent(internal.attempt!, {
+      payload: {
+        type: "session.updated",
+        properties: { info: { ...info("old", 10), revert: { messageID: "user-2" } } },
+      },
+    } as never)
+    equal(session.snapshot().phase, "syncing")
+    equal(internal.attempt!.boundarySync, undefined)
+
+    shared.resolve({ data: { ...info("old", 10), share: { url: "https://share.opencode.ai/safe" } } })
+    equal(await sharing, "https://share.opencode.ai/safe")
+    await internal.attempt!.boundarySync
+
+    deepEqual(session.snapshot().messages.map((message) => message.text), ["authoritative visible turn"])
+    equal(session.snapshot().rolledBack.count, 2)
+    equal(session.snapshot().phase, "ready")
   })
 
   it("accepts only HTTPS or loopback HTTP share links", async () => {

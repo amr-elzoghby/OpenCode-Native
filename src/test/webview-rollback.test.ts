@@ -98,12 +98,14 @@ describe("rolled-back message dock", () => {
     Object.defineProperty(globalThis, "document", { configurable: true, value: fakeDocument })
     try {
       const root = fakeDocument.createElement("section")
+      const fallback = fakeDocument.createElement("textarea")
       const restored: string[] = []
       const announcements: string[] = []
       const dock = createRollbackDock(
         root as unknown as HTMLElement,
         (key) => restored.push(key),
         (message) => announcements.push(message),
+        () => fallback.focus(),
       )
       const projection = {
         count: 2,
@@ -128,6 +130,7 @@ describe("rolled-back message dock", () => {
       const restore = firstRow?.children[1]
       equal(preview?.dir, "auto")
       equal(preview?.textContent, "راجع <img src=x> README مع English")
+      restore?.focus()
       restore?.dispatch(event("click").value)
       restore?.dispatch(event("click").value)
       deepEqual(restored, ["opaque_rollback_key_1234"])
@@ -135,16 +138,30 @@ describe("rolled-back message dock", () => {
       equal(list?.querySelectorAll<FakeElement>("button").every((button) => button.disabled), true)
       dock.update(projection, false)
       const refreshedButtons = list?.querySelectorAll<FakeElement>("button") ?? []
+      equal(list?.children[0], firstRow)
+      equal(fakeDocument.activeElement, restore)
       equal(refreshedButtons.every((button) => button.disabled), true)
       equal(dock.resolve("opaque_rollback_key_other", "rejected"), false)
       equal(dock.resolve("opaque_rollback_key_1234", "rejected"), true)
+      equal(fakeDocument.activeElement, summary)
       const unlockedButtons = list?.querySelectorAll<FakeElement>("button") ?? []
       equal(unlockedButtons.every((button) => !button.disabled), true)
       unlockedButtons[1]?.dispatch(event("click").value)
+      dock.update({ count: 0, truncated: false, messages: [] }, false)
+      equal(root.getAttribute("aria-busy"), "true")
       equal(dock.resolve("opaque_rollback_key_5678", "restored"), true)
-      equal(list?.querySelectorAll<FakeElement>("button").every((button) => button.disabled), true)
+      equal(root.getAttribute("aria-busy"), "false")
+      equal(fakeDocument.activeElement, fallback)
       deepEqual(restored, ["opaque_rollback_key_1234", "opaque_rollback_key_5678"])
+      deepEqual(announcements, [
+        "Restoring rolled-back message…",
+        "Rolled-back message was not restored.",
+        "Restoring rolled-back message…",
+        "Rolled-back message restored.",
+      ])
 
+      dock.update(projection, false)
+      summary?.dispatch(event("click").value)
       const escape = event("keydown", "Escape")
       root.dispatch(escape.value)
       equal(escape.prevented(), true)
@@ -172,7 +189,7 @@ describe("rolled-back message dock", () => {
       const [summary, , list] = root.children
       summary?.dispatch(event("click").value)
       equal(list?.hidden, false)
-      equal(list?.children.at(-1)?.textContent, "2 older rolled-back messages are not shown.")
+      equal(list?.children.at(-1)?.textContent, "2 newer rolled-back messages are not shown.")
 
       dock.update({
         count: 1,

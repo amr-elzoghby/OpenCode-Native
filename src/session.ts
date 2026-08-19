@@ -106,6 +106,7 @@ type Attempt = {
   reconciling?: Promise<void>
   reconcileRequested?: boolean
   boundarySync?: Promise<void>
+  deferredBoundary?: { sessionID: string; messageID?: string }
   reconciliationError?: string
   reviewMessageID?: string
   revertMessageID?: string
@@ -602,6 +603,7 @@ export class SessionController {
       return false
     } finally {
       this.mutationBusy = false
+      this.resumeDeferredBoundarySync()
     }
   }
 
@@ -658,6 +660,8 @@ export class SessionController {
       }
       this.generation++
       attempt.sessionID = target.id
+      attempt.deferredBoundary = undefined
+      attempt.reconcileRequested = false
       attempt.reviewMessageID = undefined
       this.submissionTracker.clear()
       this.reviewEpoch++
@@ -812,6 +816,8 @@ export class SessionController {
     const attempt = this.attempt
     if (attempt) {
       attempt.sessionID = undefined
+      attempt.deferredBoundary = undefined
+      attempt.reconcileRequested = false
       attempt.revertMessageID = undefined
       attempt.sessionUsage = undefined
       attempt.reconciliationError = undefined
@@ -921,6 +927,8 @@ export class SessionController {
         replayEvents(hydrated.transcript, attempt.pendingEvents?.events ?? [], target.id)
         const selection = resolveSelection(attempt.catalog!, selectionForSession(hydrated.session, this.state.selection))
         attempt.sessionID = target.id
+        attempt.deferredBoundary = undefined
+        attempt.reconcileRequested = false
         attempt.revertMessageID = hydrated.session.revert?.messageID
         attempt.sessionUsage = sessionUsageAfterEvents(
           attempt.pendingEvents?.events ?? [], target.id, hydrated.session.usage,
@@ -944,10 +952,12 @@ export class SessionController {
         return false
       })
       .finally(() => {
-        if (attempt.pendingEvents?.sessionID === target.id && attempt.pendingEvents.generation === generation) {
-          attempt.pendingEvents = undefined
-        }
+        const pending = attempt.pendingEvents?.sessionID === target.id && attempt.pendingEvents.generation === generation
+          ? attempt.pendingEvents
+          : undefined
+        if (pending) attempt.pendingEvents = undefined
         if (this.transitioning === transitioning) this.transitioning = undefined
+        this.replayQueuedBoundary(attempt, pending)
       })
     attempt.pendingEvents = { sessionID: target.id, generation, events: [], overflow: false }
     this.transitioning = transitioning
@@ -1024,10 +1034,12 @@ export class SessionController {
         return false
       })
       .finally(() => {
-        if (attempt.pendingEvents?.sessionID === sessionID && attempt.pendingEvents.generation === generation) {
-          attempt.pendingEvents = undefined
-        }
+        const pending = attempt.pendingEvents?.sessionID === sessionID && attempt.pendingEvents.generation === generation
+          ? attempt.pendingEvents
+          : undefined
+        if (pending) attempt.pendingEvents = undefined
         if (this.transitioning === transitioning) this.transitioning = undefined
+        this.replayQueuedBoundary(attempt, pending)
       })
     attempt.pendingEvents = { sessionID, generation, events: [], overflow: false }
     this.transitioning = transitioning
@@ -1341,6 +1353,8 @@ export class SessionController {
     const session = parseSession(created.data)
     if (!session) throw new Error("OpenCode did not create a session.")
     attempt.sessionID = session.id
+    attempt.deferredBoundary = undefined
+    attempt.reconcileRequested = false
     attempt.revertMessageID = undefined
     attempt.sessionUsage = session.usage
     attempt.reviewMessageID = undefined
@@ -1400,7 +1414,9 @@ export class SessionController {
         this.questions.clear()
         this.state = { ...this.state, phase: "syncing", error: undefined }
         this.flushRender()
-        if (!this.mutationBusy) {
+        if (this.mutationBusy || this.promptBusy || this.submitting || this.transitioning || attempt.boundarySync) {
+          attempt.deferredBoundary = { sessionID, messageID: session.revert?.messageID }
+        } else {
           attempt.reconcileRequested = false
           const generation = ++this.generation
           this.syncHistoryBoundary(attempt, sessionID, generation)
@@ -1643,6 +1659,7 @@ export class SessionController {
         attempt.reconciliationError = undefined
         if (error) this.submissionTracker.fail(error)
         this.update({ phase: error ? "error" : "ready", error })
+        this.resumeDeferredBoundarySync()
       })
       .catch(() => {
         if (
@@ -1658,11 +1675,19 @@ export class SessionController {
         attempt.reconciliationError = undefined
         this.submissionTracker.fail(error)
         this.update({ phase: "error", error })
+        this.resumeDeferredBoundarySync()
       })
       .finally(() => {
         if (attempt.reconciling !== reconciling) return
         attempt.reconciling = undefined
-        if (attempt.reconcileRequested && this.attempt === attempt && !attempt.abort.signal.aborted && attempt.sessionID) {
+        if (
+          attempt.reconcileRequested &&
+          !attempt.deferredBoundary &&
+          !attempt.boundarySync &&
+          this.attempt === attempt &&
+          !attempt.abort.signal.aborted &&
+          attempt.sessionID
+        ) {
           void this.reconcile(attempt)
         }
       })
@@ -1683,7 +1708,10 @@ export class SessionController {
         }
       })
       .finally(() => {
-        if (attempt.boundarySync === syncing) attempt.boundarySync = undefined
+        if (attempt.boundarySync === syncing) {
+          attempt.boundarySync = undefined
+          this.resumeDeferredBoundarySync()
+        }
       })
     attempt.boundarySync = syncing
   }
@@ -1827,6 +1855,10 @@ export class SessionController {
 
   private installRolledBack(attempt: Attempt, hydrated: HydratedSession) {
     const boundaryMessageID = hydrated.session.revert?.messageID
+    if (
+      attempt.deferredBoundary?.sessionID === hydrated.session.id &&
+      attempt.deferredBoundary.messageID === boundaryMessageID
+    ) attempt.deferredBoundary = undefined
     const projected = hydrated.rolledBack
     if (!boundaryMessageID || !projected?.count) {
       this.clearRolledBack()
@@ -1943,16 +1975,55 @@ export class SessionController {
       return await operation()
     } finally {
       this.mutationBusy = false
+      this.resumeDeferredBoundarySync()
       const attempt = this.attempt
-      if (attempt?.reconcileRequested && !attempt.reconciling && attempt.sessionID && !attempt.abort.signal.aborted) {
+      if (
+        attempt?.reconcileRequested &&
+        !attempt.deferredBoundary &&
+        !attempt.boundarySync &&
+        !attempt.reconciling &&
+        attempt.sessionID &&
+        !attempt.abort.signal.aborted
+      ) {
         void this.reconcile(attempt)
       }
+    }
+  }
+
+  private resumeDeferredBoundarySync() {
+    const attempt = this.attempt
+    const deferred = attempt?.deferredBoundary
+    if (!attempt || !deferred) return
+    if (this.mutationBusy || this.promptBusy || this.submitting || this.transitioning || attempt.boundarySync) return
+    if (attempt.abort.signal.aborted || attempt.sessionID !== deferred.sessionID) {
+      attempt.deferredBoundary = undefined
+      attempt.reconcileRequested = false
+      return
+    }
+    attempt.deferredBoundary = undefined
+    attempt.reconcileRequested = false
+    const generation = ++this.generation
+    this.syncHistoryBoundary(attempt, deferred.sessionID, generation)
+  }
+
+  private replayQueuedBoundary(
+    attempt: Attempt,
+    pending?: { sessionID: string; generation: number; events: GlobalEvent[]; overflow: boolean },
+  ) {
+    if (!pending || this.attempt !== attempt || attempt.abort.signal.aborted || attempt.sessionID !== pending.sessionID) return
+    for (let index = pending.events.length - 1; index >= 0; index--) {
+      const event = pending.events[index]
+      if (event?.payload.type !== "session.updated" || eventSessionID(event) !== pending.sessionID) continue
+      this.applyEvent(attempt, event)
+      break
     }
   }
 
   private resetToNewChat(attempt: Attempt) {
     if (this.attempt !== attempt) return
     attempt.sessionID = undefined
+    attempt.deferredBoundary = undefined
+    attempt.reconcileRequested = false
     attempt.revertMessageID = undefined
     attempt.sessionUsage = undefined
     attempt.reviewMessageID = undefined
@@ -2198,6 +2269,10 @@ function eventSessionID(event: GlobalEvent) {
   if (event.payload.type === "message.updated") return event.payload.properties.info.sessionID
   if (event.payload.type === "message.part.updated") return event.payload.properties.part.sessionID
   const properties = record(record(event.payload)?.properties)
+  if (event.payload.type === "session.updated") {
+    const session = record(properties?.info)
+    return typeof session?.id === "string" ? session.id : undefined
+  }
   return typeof properties?.sessionID === "string" ? properties.sessionID : undefined
 }
 

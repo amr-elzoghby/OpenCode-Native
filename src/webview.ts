@@ -100,6 +100,7 @@ const rollback = createRollbackDock(
   rollbackRoot,
   (key) => vscode.postMessage({ type: "restoreRolledBack", key }),
   (message) => { announcer.textContent = message },
+  () => prompt.focus(),
 )
 const providerConnect = createProviderConnect(providerConnectRoot, {
   activate: () => {
