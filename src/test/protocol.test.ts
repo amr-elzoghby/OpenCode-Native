@@ -340,6 +340,22 @@ describe("Webview request protocol", () => {
     equal(message?.state.selection.model?.modelID, "gpt-safe")
     equal(message?.state.messages[0]?.turnID, "message-1")
     deepEqual(message?.state.rolledBack, { count: 0, truncated: false, messages: [] })
+    equal(parseStateMessage({
+      type: "state",
+      id: 3,
+      state: {
+        ...message?.state,
+        selection: { ...message?.state.selection, model: { ...message?.state.selection.model, apiKey: "must-not-cross" } },
+      },
+    }), undefined)
+    equal(parseStateMessage({
+      type: "state",
+      id: 3,
+      state: {
+        ...message?.state,
+        attachments: [{ id: "opaque_attachment_123", kind: "selection", label: "src/a.ts", range: { start: 1, end: 2, raw: "must-not-cross" } }],
+      },
+    }), undefined)
   })
 
   it("accepts only bounded rolled-back message projections", () => {

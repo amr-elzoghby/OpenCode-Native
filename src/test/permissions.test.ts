@@ -27,6 +27,19 @@ describe("permission trust boundary", () => {
     equal(store.snapshot().length, 1)
   })
 
+  it("rotates the opaque key when Core changes a request with the same ID", () => {
+    const keys = ["opaque_permission_key_old", "opaque_permission_key_new"]
+    const store = new PermissionStore(() => keys.shift()!)
+    const initial = { ...permission(), metadata: { command: "bun test" } }
+    store.upsert(initial, "session-1")
+    const oldKey = store.snapshot()[0]!.key
+    store.upsert({ ...initial, metadata: { command: "bun run build" } }, "session-1")
+    const updated = store.snapshot()[0]!
+    equal(updated.key, "opaque_permission_key_new")
+    equal(updated.details[0], "bun run build")
+    equal(store.resolve(oldKey), undefined)
+  })
+
   it("sanitizes control and BiDi display text without forwarding metadata", () => {
     const store = new PermissionStore(() => "opaque_permission_key_123")
     store.upsert({
@@ -49,7 +62,7 @@ describe("permission trust boundary", () => {
       ...permission(),
       id: "per_shell",
       metadata: {
-        command: "API_TOKEN=env-secret curl -H \"Authorization: Bearer bearer-secret\" --header 'X-API-Key: api-secret' -u user:user-secret https://user:pass@example.com",
+        command: "TOKEN=plain-value GITHUB_TOKEN=github-value AWS_SECRET_ACCESS_KEY=aws-value REDIS_PASSWORD=redirect-value>target.txt (GH_TOKEN=paren-value command) && OPENAI_API_KEY=separator-value command | CLIENT_SECRET=pipe-value command; curl -H \"Authorization: Bearer bearer-value\" --header 'X-API-Key: api-value' --client-secret flag-value -u user:user-value 'https://user:pass@example.com?q=ok&token=query-value#access_token=fragment-value'",
       },
     }, "session-1")
     const output = JSON.stringify(store.snapshot())
@@ -58,7 +71,10 @@ describe("permission trust boundary", () => {
     equal(output.includes("Authorization: [redacted]"), true)
     equal(output.includes("X-API-Key: [redacted]"), true)
     equal(output.includes("https://[redacted]@example.com"), true)
-    equal(output.includes("secret"), false)
+    for (const value of ["plain-value", "github-value", "aws-value", "redirect-value", "paren-value", "separator-value", "pipe-value", "bearer-value", "api-value", "flag-value", "user-value", "query-value", "fragment-value"]) {
+      equal(output.includes(value), false)
+    }
+    equal(output.includes(">target.txt"), true)
   })
 
   it("projects allowlisted search, web, task, and external-directory context", () => {

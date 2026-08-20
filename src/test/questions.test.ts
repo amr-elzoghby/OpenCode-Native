@@ -1,5 +1,4 @@
 import { deepEqual, equal, match } from "node:assert/strict"
-import { describe, it } from "node:test"
 import { QuestionStore } from "../questions"
 
 describe("question trust boundary", () => {

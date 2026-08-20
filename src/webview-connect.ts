@@ -270,6 +270,7 @@ export function createProviderConnect(root: HTMLElement, actions: {
   }
 
   function hide() {
+    if (root.hidden) return
     root.hidden = true
     providers = []
     methods = []

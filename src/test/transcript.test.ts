@@ -179,12 +179,15 @@ describe("streamed transcript", () => {
       state: {
         status: "running",
         input: {
-          command: "API_KEY=env-secret curl -H \"Authorization: Bearer bearer-secret\" --header 'X-API-Key: api-secret' -u me:user-secret https://me:pass@example.com",
+          command: "TOKEN=plain-value GITHUB_TOKEN=github-value AWS_SECRET_ACCESS_KEY=aws-value REDIS_PASSWORD=redirect-value>target.txt (GH_TOKEN=paren-value command) && OPENAI_API_KEY=separator-value command | CLIENT_SECRET=pipe-value command; curl -H \"Authorization: Bearer bearer-value\" --header 'X-API-Key: api-value' --client-secret flag-value -u me:user-value 'https://me:pass@example.com?q=ok&token=query-value#access_token=fragment-value'",
         },
       },
     })
     const detail = transcript.activitySnapshot()[0]?.items[0]?.detail ?? ""
-    equal(detail.includes("secret"), false)
+    for (const value of ["plain-value", "github-value", "aws-value", "redirect-value", "paren-value", "separator-value", "pipe-value", "bearer-value", "api-value", "flag-value", "user-value", "query-value", "fragment-value"]) {
+      equal(detail.includes(value), false)
+    }
+    equal(detail.includes(">target.txt"), true)
     equal(detail.includes("Authorization: <redacted>"), true)
     equal(detail.includes("X-API-Key: <redacted>"), true)
     equal(detail.includes("me:pass"), false)

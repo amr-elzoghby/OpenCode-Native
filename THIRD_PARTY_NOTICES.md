@@ -1,6 +1,6 @@
 # Third-Party Notices
 
-OpenCode Native bundles portions of the OpenCode SDK, distributed under the
+OpenCode Native Sidebar bundles portions of the OpenCode SDK, distributed under the
 OpenCode MIT License reproduced in [LICENSE](LICENSE).
 
 ## Marked

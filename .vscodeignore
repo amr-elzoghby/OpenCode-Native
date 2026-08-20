@@ -1,9 +1,14 @@
 .vscode/**
 .vscode-test/**
+.github/**
+.agents/**
+.codex/**
 out/**
 node_modules/**
 src/**
 script/**
+media/**
+dist/*.vsix
 .gitignore
 .yarnrc
 bun.lock

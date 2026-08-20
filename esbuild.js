@@ -16,7 +16,7 @@ const esbuildProblemMatcherPlugin = {
     build.onEnd((result) => {
       result.errors.forEach(({ text, location }) => {
         console.error(`✘ [ERROR] ${text}`)
-        console.error(`    ${location.file}:${location.line}:${location.column}:`)
+        if (location) console.error(`    ${location.file}:${location.line}:${location.column}:`)
       })
       console.log("[watch] build finished")
     })
@@ -24,8 +24,10 @@ const esbuildProblemMatcherPlugin = {
 }
 
 async function main() {
-  const contexts = await Promise.all(
-    [
+  const contexts = []
+  let keepContexts = false
+  try {
+    const builds = [
       {
         entryPoints: ["src/extension.ts"],
         format: "cjs",
@@ -45,8 +47,9 @@ async function main() {
         platform: "node",
         outfile: "dist/server-host.js",
       },
-    ].map((options) =>
-      esbuild.context({
+    ]
+    for (const options of builds) {
+      contexts.push(await esbuild.context({
         ...options,
         bundle: true,
         minify: production,
@@ -54,16 +57,17 @@ async function main() {
         sourcesContent: false,
         logLevel: "silent",
         plugins: [esbuildProblemMatcherPlugin],
-      }),
-    ),
-  )
-  if (watch) {
-    await Promise.all(contexts.map((context) => context.watch()))
-    return
+      }))
+    }
+    if (watch) {
+      await Promise.all(contexts.map((context) => context.watch()))
+      keepContexts = true
+      return
+    }
+    await Promise.all(contexts.map((context) => context.rebuild()))
+  } finally {
+    if (!keepContexts) await Promise.allSettled(contexts.map((context) => context.dispose()))
   }
-
-  await Promise.all(contexts.map((context) => context.rebuild()))
-  await Promise.all(contexts.map((context) => context.dispose()))
 }
 
 main().catch((e) => {

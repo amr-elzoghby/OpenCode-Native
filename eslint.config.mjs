@@ -25,4 +25,10 @@ export default [
       semi: ["error", "never"],
     },
   },
+  {
+    files: ["esbuild.js"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
 ]

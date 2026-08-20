@@ -39,11 +39,11 @@ export function activate(context: ExtensionContext) {
   const focusDisposable = commands.registerCommand("opencode.native.focus", () =>
     commands.executeCommand(`${SidebarProvider.viewID}.focus`),
   )
-  const openNewTerminalDisposable = commands.registerCommand("opencode.openNewTerminal", async () => {
+  const openNewTerminalDisposable = commands.registerCommand("opencode.native.openNewTerminal", async () => {
     await openTerminal()
   })
 
-  const openTerminalDisposable = commands.registerCommand("opencode.openTerminal", async () => {
+  const openTerminalDisposable = commands.registerCommand("opencode.native.openTerminal", async () => {
     const existingTerminal = window.terminals.find((terminal) => terminal.name === TERMINAL_NAME)
     if (existingTerminal) {
       existingTerminal.show()

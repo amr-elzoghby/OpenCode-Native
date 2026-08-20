@@ -78,11 +78,13 @@ export function createTimeline(
   return {
     open(value: Message[]) {
       messages = value.filter((message) => message.role === "user")
-      previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
-      background.forEach((item) => {
-        item.inert = true
-        item.setAttribute("aria-hidden", "true")
-      })
+      if (root.hidden) {
+        previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+        background.forEach((item) => {
+          item.inert = true
+          item.setAttribute("aria-hidden", "true")
+        })
+      }
       root.hidden = false
       search.value = ""
       render()

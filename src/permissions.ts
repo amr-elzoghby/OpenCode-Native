@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto"
 import path from "node:path"
+import { redactCommand } from "./redaction"
 import { reviewDocument } from "./review"
 
 const MAX_REQUESTS = 20
@@ -51,7 +52,7 @@ export class PermissionStore {
     if (existing?.fingerprint === requestFingerprint) return
     const documents = permissionDocuments(permission, request, this.createKey)
     this.records.set(request.id, {
-      key: existing?.key ?? this.createKey(),
+      key: this.createKey(),
       requestID: request.id,
       sessionID,
       title: context.title,
@@ -190,7 +191,8 @@ function safeList(value: unknown): value is string[] {
   return Array.isArray(value) && value.length <= MAX_PATTERNS && value.every((item) => typeof item === "string" && item.length <= 2_000)
 }
 
-function safeText(value: string, maximum: number) {
+function safeText(value: unknown, maximum: number) {
+  if (typeof value !== "string" || value.length > maximum * 4) return
   const text = value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/gu, "�").trim().slice(0, maximum)
   return text || undefined
 }
@@ -233,20 +235,14 @@ function safeURL(value: unknown) {
 function safeCommand(value: unknown) {
   const command = safeTextValue(value, 2_000)
   if (!command) return
-  return command
-    .replace(/("(?:(?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*)[^"]*"/giu, '$1[redacted]"')
-    .replace(/('(?:(?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*)[^']*'/giu, "$1[redacted]'")
-    .replace(/((?:(?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*)(?:(?:basic|bearer)\s+)?[^\s"']+/giu, "$1[redacted]")
-    .replace(/\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|AUTHORIZATION))\s*=\s*(?:"[^"]*"|'[^']*'|\S+)/giu, "$1=[redacted]")
-    .replace(/(^|\s)(--?(?:api[-_]?key|token|secret|password|authorization))(?:=|\s+)(?:"[^"]*"|'[^']*'|\S+)/giu, "$1$2 [redacted]")
-    .replace(/(\s(?:-u|--user)(?:=|\s+))(?:"[^"]*"|'[^']*'|\S+)/giu, "$1[redacted]")
-    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/giu, "$1[redacted]@")
+  return redactCommand(command, "[redacted]")
 }
 
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
 
-function safeID(value: string) {
-  return value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
+function safeID(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 512 &&
+    !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
 }

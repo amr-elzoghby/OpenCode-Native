@@ -6,6 +6,7 @@ import {
 } from "./protocol"
 import { randomBytes } from "node:crypto"
 import path from "node:path"
+import { redactCommand } from "./redaction"
 import { ReviewStore, type FileDiff, type ReviewSummary } from "./review"
 import {
   addCosts,
@@ -736,14 +737,7 @@ function safeURL(value: unknown) {
 function safeCommand(value: unknown) {
   const command = safeText(value, 1_000)
   if (!command) return
-  return command
-    .replace(/("(?:(?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*)[^"]*"/giu, '$1<redacted>"')
-    .replace(/('(?:(?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*)[^']*'/giu, "$1<redacted>'")
-    .replace(/((?:(?:proxy-)?authorization|cookie|set-cookie|x-api-key|x-auth-token)\s*:\s*)(?:(?:basic|bearer)\s+)?[^\s"']+/giu, "$1<redacted>")
-    .replace(/\b((?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|authorization)\s*=\s*)(?:'[^']*'|"[^"]*"|[^\s]+)/giu, "$1<redacted>")
-    .replace(/(\s--?(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|passwd|secret|authorization)(?:=|\s+))(?:'[^']*'|"[^"]*"|[^\s]+)/giu, "$1<redacted>")
-    .replace(/(\s(?:-u|--user)(?:=|\s+))(?:'[^']*'|"[^"]*"|[^\s]+)/giu, "$1<redacted>")
-    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/giu, "$1<redacted>@")
+  return redactCommand(command, "<redacted>")
 }
 
 function safeText(value: unknown, maximum: number) {

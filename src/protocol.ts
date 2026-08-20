@@ -21,6 +21,7 @@ export const MAX_TRANSCRIPT_MESSAGES = 200
 export const MAX_TRANSCRIPT_MESSAGE_CHARS = 256_000
 export const MAX_TRANSCRIPT_TOTAL_CHARS = 2_000_000
 export const MAX_TRANSCRIPT_DELTA_CHARS = 32_000
+export const MAX_HISTORY_SESSIONS = 200
 
 export const NATIVE_ACTIONS = [
   "new",
@@ -478,7 +479,8 @@ export function parseRollbackResultMessage(value: unknown): RollbackResultMessag
 
 export function parseHistoryMessage(value: unknown): HistoryMessage | undefined {
   const item = record(value)
-  if (!item || item.type !== "history" || !safeArray(item.sessions, isHistorySession) || (item.sessions as unknown[]).length > 200) return
+  if (!item || item.type !== "history" || !safeArray(item.sessions, isHistorySession) ||
+    (item.sessions as unknown[]).length > MAX_HISTORY_SESSIONS) return
   if (
     (item.status === "loading" || item.status === "closed") &&
     exactKeys(item, ["type", "status", "sessions"]) &&
@@ -690,7 +692,8 @@ function isAttachment(value: unknown): value is AttachmentChip {
   if (item.kind === "image") return item.range === undefined
   if (item.range === undefined) return true
   const range = record(item.range)
-  return !!range && Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) &&
+  return !!range && exactKeys(range, ["start", "end"]) &&
+    Number.isSafeInteger(range.start) && Number.isSafeInteger(range.end) &&
     Number(range.start) > 0 && Number(range.end) >= Number(range.start)
 }
 
@@ -871,7 +874,8 @@ function isSelection(value: unknown) {
   if (!optionalString(item, "agent") || !optionalString(item, "variant")) return false
   if (!("model" in item) || item.model === undefined) return true
   const selected = record(item.model)
-  return !!selected && safeString(selected.providerID) && safeString(selected.modelID)
+  return !!selected && exactKeys(selected, ["providerID", "modelID"]) &&
+    safeString(selected.providerID) && safeString(selected.modelID)
 }
 
 function safeArray(value: unknown, predicate: (item: unknown) => boolean) {

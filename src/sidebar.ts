@@ -110,7 +110,9 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         this.timing("Rejected an invalid Webview message")
         return
       }
-      void this.handleMessage(parsed)
+      void this.handleMessage(parsed).catch(() => {
+        this.session.reportError("OpenCode could not complete that action safely. Refresh and try again.")
+      })
     })
     view.onDidDispose(() => {
       if (this.view !== view) return
@@ -1224,8 +1226,7 @@ function html(webview: Webview, script: Uri, language: string) {
       .transcript-shell { position: relative; min-height: 0; }
       #empty-brand { position: absolute; z-index: 0; inset: 0; display: grid; place-items: center; pointer-events: none; }
       #empty-brand svg { width: min(360px, 82%); height: auto; }
-      #empty-brand .wordmark-open { color: var(--vscode-descriptionForeground); opacity: 0.55; }
-      #empty-brand .wordmark-code { color: var(--vscode-foreground); opacity: 0.82; }
+      #empty-brand .native-brand { opacity: 0.72; }
       #transcript { position: absolute; inset: 0; overflow-y: auto; padding: 10px 11px 22px; scrollbar-gutter: stable; }
       #sticky-prompt { position: absolute; z-index: 10; inset-block-start: 7px; inset-inline: 9px; width: calc(100% - 18px); max-height: 42px; overflow: hidden; padding: 6px 9px; border: 1px solid var(--opencode-accent-border); border-inline-start-width: 2px; border-radius: 7px; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); box-shadow: 0 5px 16px var(--vscode-widget-shadow); text-align: start; cursor: pointer; line-height: 1.35; white-space: nowrap; text-overflow: ellipsis; unicode-bidi: plaintext; }
       #sticky-prompt:hover { background: var(--vscode-toolbar-hoverBackground); }
@@ -1462,11 +1463,26 @@ function html(webview: Webview, script: Uri, language: string) {
       <section class="provider-connect" id="provider-connect" role="dialog" aria-modal="true" aria-label="Connect an AI provider" hidden></section>
       <div class="usage-control" id="usage" aria-label="Chat token details" hidden></div>
       <div class="transcript-shell">
-        <!-- Canonical simple wordmark geometry from packages/console/app/src/asset/brand. -->
+        <!-- OpenCode Native brand mark; the wide viewBox preserves the existing empty-state footprint. -->
         <div id="empty-brand" aria-hidden="true">
           <svg viewBox="0 0 640 115">
-            <path class="wordmark-open" d="M49.2308 32.8573H16.4103V82.143H49.2308V32.8573ZM65.641 98.5716H0V16.4287H65.641V98.5716ZM98.4649 82.143H131.285V32.8573H98.4649V82.143ZM147.696 98.5716H98.4649V115H82.0547V16.4287H147.696V98.5716ZM229.743 65.7144H180.512V82.143H229.743V98.5716H164.102V16.4287H229.743V65.7144ZM180.512 49.2859H213.332V32.8573H180.512V49.2859ZM295.387 32.8573H262.567V98.5716H246.156V16.4287H295.387V32.8573ZM311.797 98.5716H295.387V32.8573H311.797V98.5716Z" fill="currentColor"/>
-            <path class="wordmark-code" d="M393.844 32.8573H344.613V82.143H393.844V98.5716H328.203V16.4287H393.844V32.8573ZM459.489 32.8573H426.668V82.143H459.489V32.8573ZM475.899 98.5716H410.258V16.4287H475.899V98.5716ZM541.535 32.8571H508.715V82.1428H541.535V32.8571ZM557.946 98.5714H492.305V16.4286H541.535V0H557.946V98.5714ZM590.77 32.8573V49.2859H623.59V32.8573H590.77ZM640 65.7144H590.77V82.143H640V98.5716H574.359V16.4287H640V65.7144Z" fill="currentColor"/>
+            <defs>
+              <linearGradient id="native-frame" x1="4" y1="4" x2="18" y2="20" gradientUnits="userSpaceOnUse">
+                <stop offset="0.55" stop-color="#ffffff"/>
+                <stop offset="1" stop-color="#1687ff"/>
+              </linearGradient>
+              <linearGradient id="native-letter" x1="12" y1="6.5" x2="12" y2="17.5" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#06e5df"/>
+                <stop offset="1" stop-color="#1687ff"/>
+              </linearGradient>
+            </defs>
+            <g class="native-brand" transform="translate(262.5 0.5) scale(4.75)">
+              <rect x="0.4" y="0.4" width="23.2" height="23.2" rx="5" fill="#081526" stroke="#162a49" stroke-width="0.25"/>
+              <path d="M18 7V5.8A1.8 1.8 0 0 0 16.2 4H5.8A1.8 1.8 0 0 0 4 5.8v12.4A1.8 1.8 0 0 0 5.8 20h10.4a1.8 1.8 0 0 0 1.8-1.8V17" fill="none" stroke="url(#native-frame)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M7 17.2V7.1c0-.35.4-.55.68-.35l4.4 3.2v2.3L8.8 9.85v7.35H7Zm9.9-10.4v10.1c0 .35-.4.55-.68.35l-4.4-3.2v-2.3l3.28 2.4V6.8h1.8Z" fill="url(#native-letter)"/>
+              <path d="M19.5 9.3h1M19.5 14.7h1" fill="none" stroke="#607594" stroke-width="1.4" stroke-linecap="round"/>
+              <path d="M19.5 12h1" fill="none" stroke="#06dfe3" stroke-width="1.4" stroke-linecap="round"/>
+            </g>
           </svg>
         </div>
         <button id="sticky-prompt" type="button" dir="auto" hidden></button>

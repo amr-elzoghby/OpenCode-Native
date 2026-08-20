@@ -1,5 +1,5 @@
 import { equal } from "node:assert/strict"
-import { activityLabel, formatDuration, formatTimestamp, reviewReady } from "../webview-transcript"
+import { activityLabel, formatDuration, formatTimestamp, markdownNodeAllowance, reviewReady } from "../webview-transcript"
 import type { ViewState } from "../protocol"
 
 type Activity = ViewState["activities"][number]
@@ -41,6 +41,13 @@ describe("activity disclosure presentation", () => {
     equal(formatTimestamp(undefined), "—")
     equal(formatTimestamp(Number.NaN), "—")
     equal(formatTimestamp(0) === "—", false)
+  })
+
+  it("bounds Markdown nodes per response and across the complete transcript", () => {
+    equal(markdownNodeAllowance(0), 4_000)
+    equal(markdownNodeAllowance(18_000), 2_000)
+    equal(markdownNodeAllowance(20_000), 0)
+    equal(markdownNodeAllowance(25_000), 0)
   })
 })
 

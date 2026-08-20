@@ -1,5 +1,13 @@
-<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-<rect width="512" height="512" fill="#FDFCFC"/>
-<path d="M320 224V352H192V224H320Z" fill="#E6E5E6"/>
-<path fill-rule="evenodd" clip-rule="evenodd" d="M384 416H128V96H384V416ZM320 160H192V352H320V160Z" fill="#17181C"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none">
+  <style>
+    .native-fill { fill: #c5c5c5; }
+    .native-stroke { fill: none; stroke: #c5c5c5; }
+    @media (prefers-color-scheme: light) {
+      .native-fill { fill: #424242; }
+      .native-stroke { stroke: #424242; }
+    }
+  </style>
+  <path class="native-stroke" d="M18 7V5.8A1.8 1.8 0 0 0 16.2 4H5.8A1.8 1.8 0 0 0 4 5.8v12.4A1.8 1.8 0 0 0 5.8 20h10.4a1.8 1.8 0 0 0 1.8-1.8V17" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="native-fill" d="M7 17.2V7.1c0-.35.4-.55.68-.35l4.4 3.2v2.3L8.8 9.85v7.35H7Zm9.9-10.4v10.1c0 .35-.4.55-.68.35l-4.4-3.2v-2.3l3.28 2.4V6.8h1.8Z"/>
+  <path class="native-stroke" d="M19.5 9.3h1M19.5 12h1M19.5 14.7h1" stroke-width="1.4" stroke-linecap="round"/>
 </svg>

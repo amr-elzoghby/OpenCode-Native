@@ -39,6 +39,7 @@ const usageRoot = required<HTMLElement>("#usage")
 const variantRoot = required<HTMLElement>("#variant-picker")
 let current: ViewState | undefined
 let previousPhase: ViewState["phase"] | undefined
+let latestStateID = 0
 let pending: {
   requestID: string
   text: string
@@ -67,7 +68,7 @@ const history = createHistory(historyRoot, {
   select: (key) => vscode.postMessage({ type: "selectSession", key }),
   rename: (key, title) => vscode.postMessage({ type: "renameSession", key, title }),
   delete: (key) => vscode.postMessage({ type: "deleteSession", key }),
-}, [transcriptShell, composer, rollbackRoot])
+}, [transcriptShell, composer, permissionRoot, questionRoot, rollbackRoot, usageRoot])
 const timeline = createTimeline(
   timelineRoot,
   (turnID) => transcriptView.scrollToTurn(turnID),
@@ -210,7 +211,8 @@ window.addEventListener("message", (event) => {
     return
   }
   const message = parseStateMessage(event.data)
-  if (!message) return
+  if (!message || message.id <= latestStateID) return
+  latestStateID = message.id
   current = message.state
   if (pending?.messageID && message.state.messages.some((item) => item.id === pending?.messageID)) pending = undefined
   render(message.state)

@@ -180,6 +180,7 @@ export function createHistory(root: HTMLElement, actions: {
 
   function hide() {
     accepting = false
+    if (root.hidden) return
     root.hidden = true
     search.value = ""
     background.forEach((item) => {

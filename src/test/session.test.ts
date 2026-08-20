@@ -1927,6 +1927,37 @@ describe("permission session isolation", () => {
     equal(replies, 0)
   })
 
+  it("invalidates the displayed key when Core replaces a permission request", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const request = { ...permissionRequest(), metadata: { command: "bun test" } }
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "permission.asked", properties: request },
+    } as never)
+    const oldKey = session.snapshot().permissions[0]!.key
+    const updated = { ...request, patterns: ["bun run build"], metadata: { command: "bun run build" } }
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "permission.asked", properties: updated },
+    } as never)
+    const prompt = session.snapshot().permissions[0]!
+    let replies = 0
+    internal.attempt!.client = {
+      permission: {
+        list: async () => ({ data: [updated] }),
+        reply: async () => {
+          replies++
+          return { data: true }
+        },
+      },
+    }
+    equal(prompt.key === oldKey, false)
+    equal(prompt.details[0], "bun run build")
+    equal(await session.replyPermission(oldKey, "allow"), false)
+    equal(replies, 0)
+    equal(await session.replyPermission(prompt.key, "allow"), true)
+    equal(replies, 1)
+  })
+
   it("does not approve after New Chat wins a pending revalidation", async () => {
     const session = controller("old")
     const internal = internals(session)

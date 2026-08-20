@@ -42,6 +42,16 @@ describe("workspace session history", () => {
     equal(projected[2]?.title, "Inspect <workspace>/secret.ts")
   })
 
+  it("keeps History within the protocol limit and retains only visible keys", () => {
+    const history = new SessionHistory(directory, keys())
+    const projected = history.replace(Array.from({ length: 250 }, (_, index) =>
+      session(`session-${index}`, directory, `Chat ${index}`, index)), {}, undefined)
+    equal(projected.length, 200)
+    equal(projected[0]?.title, "Chat 249")
+    equal(projected.at(-1)?.title, "Chat 50")
+    equal(history.resolve("opaque_session_key_201"), undefined)
+  })
+
   it("detects a session version race", () => {
     const first = session("same", directory, "Chat", 100)
     equal(sameSessionVersion(first, { ...first, time: { ...first.time, updated: 101 } }), false)
@@ -51,6 +61,11 @@ describe("workspace session history", () => {
   it("rejects malformed authoritative revert markers", () => {
     equal(parseSession({ ...session("same", directory, "Chat", 100), revert: { messageID: "x".repeat(513) } }), undefined)
     equal(parseSession({ ...session("same", directory, "Chat", 100), revert: { messageID: "user-safe" } })?.revert?.messageID, "user-safe")
+    equal(parseSession({ ...session("same", directory, "Chat", 100), parentID: 123 }), undefined)
+    equal(parseSession({ ...session("same", directory, "Chat", Number.NaN) }), undefined)
+    equal(parseSession({ ...session("same", directory, "Chat", -1) }), undefined)
+    equal(parseSession({ ...session("same", directory, "Chat", 1.5) }), undefined)
+    equal(parseSession({ ...session("same", directory, "Chat", 100), directory: `${directory}\nother` }), undefined)
   })
 
   it("projects only authoritative bounded session totals", () => {

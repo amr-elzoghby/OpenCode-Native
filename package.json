@@ -1,9 +1,9 @@
 {
-  "name": "opencode-native",
-  "displayName": "OpenCode Native",
+  "name": "opencode-native-sidebar",
+  "displayName": "OpenCode Native Sidebar",
   "description": "An unofficial, community-built native VS Code sidebar for the OpenCode CLI, with streaming chat, sessions, models, agents, and trusted workspace context.",
-  "version": "0.2.2",
-  "publisher": "amr-elzoghby",
+  "version": "0.2.3",
+  "publisher": "amr-s-elzoghby",
   "repository": {
     "type": "git",
     "url": "https://github.com/amr-elzoghby/OpenCode-Native.git"
@@ -82,7 +82,7 @@
     },
     "commands": [
       {
-        "command": "opencode.openTerminal",
+        "command": "opencode.native.openTerminal",
         "title": "Open opencode",
         "icon": {
           "light": "images/button-dark.svg",
@@ -90,7 +90,7 @@
         }
       },
       {
-        "command": "opencode.openNewTerminal",
+        "command": "opencode.native.openNewTerminal",
         "title": "Open opencode in new tab",
         "icon": {
           "light": "images/button-dark.svg",
@@ -145,7 +145,7 @@
     "menus": {
       "editor/title": [
         {
-          "command": "opencode.openNewTerminal",
+          "command": "opencode.native.openNewTerminal",
           "group": "navigation"
         }
       ],
@@ -211,7 +211,7 @@
         "when": "opencode.native.composerFocused && opencode.native.generating"
       },
       {
-        "command": "opencode.openTerminal",
+        "command": "opencode.native.openTerminal",
         "title": "Run opencode",
         "key": "cmd+escape",
         "mac": "cmd+escape",
@@ -219,7 +219,7 @@
         "linux": "ctrl+escape"
       },
       {
-        "command": "opencode.openNewTerminal",
+        "command": "opencode.native.openNewTerminal",
         "title": "Run opencode",
         "key": "cmd+shift+escape",
         "mac": "cmd+shift+escape",
@@ -244,8 +244,9 @@
     "watch-tests": "tsc -p . -w --outDir out",
     "pretest": "bun run compile-tests && bun run compile && bun run lint",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src --max-warnings=0",
-    "test": "vscode-test",
+    "lint": "eslint src esbuild.js script/*.mjs --max-warnings=0",
+    "audit": "bun audit",
+    "test": "bunx --bun vscode-test",
     "test:vsix": "bun run script/verify-vsix.mjs"
   },
   "devDependencies": {
@@ -260,5 +261,9 @@
     "typescript": "^5.9.3",
     "@vscode/test-cli": "^0.0.15",
     "@vscode/test-electron": "^3.1.0"
+  },
+  "overrides": {
+    "diff": "8.0.3",
+    "serialize-javascript": "7.0.5"
   }
 }

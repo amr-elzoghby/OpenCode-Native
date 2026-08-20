@@ -17,8 +17,18 @@ describe("Native command wiring", () => {
     }
   }
 
+  it("does not collide with the official OpenCode terminal command IDs", () => {
+    const packageSource = readFileSync(join(root, "package.json"), "utf8")
+    const extension = readFileSync(join(root, "src/extension.ts"), "utf8")
+    const wiring = `${packageSource}\n${extension}`
+    equal(wiring.includes('"opencode.openTerminal"'), false)
+    equal(wiring.includes('"opencode.openNewTerminal"'), false)
+    equal(wiring.includes('"opencode.native.openTerminal"'), true)
+    equal(wiring.includes('"opencode.native.openNewTerminal"'), true)
+  })
+
   it("keeps GUI shortcuts scoped and remappable", () => {
-    const native = manifest.contributes.keybindings.filter((binding) => binding.command.startsWith("opencode.native."))
+    const native = manifest.contributes.keybindings.filter((binding) => binding.when?.includes("opencode.native."))
     deepEqual(native, [
       { command: "opencode.native.newChat", key: "alt+n", when: "opencode.native.sidebarFocused && !inQuickOpen" },
       { command: "opencode.native.refresh", key: "alt+r", when: "opencode.native.sidebarFocused && !inQuickOpen" },
@@ -145,6 +155,7 @@ describe("Native command wiring", () => {
     equal(history.includes('event.key !== "Tab"'), true)
     equal(history.includes("item.inert = true"), true)
     equal(history.includes("previousFocus?.focus()"), true)
+    equal(history.includes("if (root.hidden) return"), true)
     equal(connect.includes('event.key !== "Tab"'), true)
     equal(connect.includes('item.closest("[hidden]")'), true)
     equal(connect.includes('event.key === "ArrowDown"'), true)
@@ -157,6 +168,7 @@ describe("Native command wiring", () => {
     equal(timeline.includes('event.key !== "Tab"'), true)
     equal(timeline.includes("item.inert = true"), true)
     equal(timeline.includes("previousFocus?.focus()"), true)
+    equal(timeline.includes("if (root.hidden) {"), true)
     equal(webview.includes("providerConnect.close()"), true)
     equal(attachments.includes('menu.setAttribute("role", "menu")'), true)
     equal(attachments.includes('button.setAttribute("role", "menuitem")'), true)
@@ -307,8 +319,10 @@ describe("Native command wiring", () => {
     equal(manifest.scripts.package.includes("package-vsix.mjs"), true)
     equal(manifest.scripts.package.includes("test:vsix"), true)
     equal(verifier.includes('actual.equals(expected)'), true)
-    equal(verifier.includes('["extension.js", "webview.js", "server-host.js"]'), true)
+    equal(verifier.includes("vsixManifest(sourceManifest)"), true)
+    equal(verifier.includes("ARCHIVE_DATE"), true)
     equal(verifier.includes("expectedFiles.sort()"), true)
     equal(packager.includes("newestSource > oldestBundle"), true)
+    equal(packager.includes('open(temporary, "wx", 0o600)'), true)
   })
 })

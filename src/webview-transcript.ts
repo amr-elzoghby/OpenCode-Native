@@ -22,7 +22,7 @@ type Turn = {
   review?: Review
   usage?: ViewState["turnUsage"][number]
 }
-type ResponseView = { element: HTMLElement; text: string; createdAt?: number }
+type ResponseView = { element: HTMLElement; text: string; createdAt?: number; nodes: number; nodeLimit: number }
 type TurnView = {
   element: HTMLElement
   prompt: HTMLElement
@@ -43,6 +43,7 @@ type ActivityView = {
 }
 
 const MAX_MARKDOWN_NODES = 4_000
+const MAX_TRANSCRIPT_MARKDOWN_NODES = 20_000
 
 export function createTranscript(
   transcript: HTMLElement,
@@ -116,6 +117,7 @@ export function createTranscript(
   ) {
     const nearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 80
     const turns = group(messages, reviews, activities, catalog.turnUsage)
+    const markdownBudget = { nodes: 0 }
     const retained = new Set(turns.map((turn) => turn.id))
     views.forEach((view, id) => {
       if (retained.has(id)) return
@@ -125,7 +127,7 @@ export function createTranscript(
     ordered = turns.map((turn) => {
       const view = views.get(turn.id) ?? createTurn(turn.id)
       views.set(turn.id, view)
-      updateTurn(view, turn, catalog)
+      updateTurn(view, turn, catalog, markdownBudget)
       transcript.append(view.element)
       return view
     })
@@ -148,7 +150,7 @@ export function createTranscript(
     return { element, prompt, responses: new Map(), activities: new Map() }
   }
 
-  function updateTurn(view: TurnView, turn: Turn, catalog: TranscriptCatalog) {
+  function updateTurn(view: TurnView, turn: Turn, catalog: TranscriptCatalog, markdownBudget: { nodes: number }) {
     view.prompt.hidden = !turn.prompt
     if (!turn.prompt) {
       view.promptText = undefined
@@ -207,14 +209,25 @@ export function createTranscript(
         renderedActivities.add(activity.messageID)
       }
       const existing = view.responses.get(response.id)
-      const next = existing ?? { element: document.createElement("article"), text: "", createdAt: undefined }
+      const next = existing ?? {
+        element: document.createElement("article"),
+        text: "",
+        createdAt: undefined,
+        nodes: 0,
+        nodeLimit: -1,
+      }
       next.element.className = "markdown"
       next.element.dir = "auto"
       next.element.hidden = !response.text
-      if (next.text !== response.text) {
-        next.element.replaceChildren(renderMarkdown(response.text, lexer))
+      const nodeLimit = markdownNodeAllowance(markdownBudget.nodes)
+      if (next.text !== response.text || next.nodeLimit !== nodeLimit) {
+        const rendered = renderMarkdown(response.text, lexer, nodeLimit)
+        next.element.replaceChildren(rendered.fragment)
         next.text = response.text
+        next.nodes = rendered.nodes
+        next.nodeLimit = nodeLimit
       }
+      markdownBudget.nodes += next.nodes
       if (next.createdAt !== response.createdAt || !next.element.querySelector(".message-time")) {
         next.element.querySelector(".message-time")?.remove()
         next.element.append(...messageTime(response.createdAt))
@@ -697,43 +710,56 @@ function count(prefix: "+" | "-", value: number, className: string) {
   return element
 }
 
-function renderMarkdown(source: string, lexer: Lexer | undefined) {
-  const fragment = document.createDocumentFragment()
-  if (!lexer) {
-    fragment.appendChild(document.createTextNode(source))
-    return fragment
-  }
-  appendTokens(fragment, lexer(source.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS)), 0, { nodes: 0, truncated: false })
-  return fragment
+export function markdownNodeAllowance(used: number) {
+  return Math.max(0, Math.min(MAX_MARKDOWN_NODES, MAX_TRANSCRIPT_MARKDOWN_NODES - used))
 }
 
-function appendTokens(parent: Node, tokens: Token[], depth: number, budget: { nodes: number; truncated: boolean }) {
+function renderMarkdown(source: string, lexer: Lexer | undefined, maximum: number) {
+  const fragment = document.createDocumentFragment()
+  const budget = { nodes: 0, truncated: false, maximum }
+  if (!source) return { fragment, nodes: 0 }
+  if (!lexer) {
+    if (reserve(fragment, budget)) fragment.appendChild(document.createTextNode(source))
+    return { fragment, nodes: budget.nodes }
+  }
+  if (!maximum) reserve(fragment, budget)
+  else appendTokens(fragment, lexer(source.slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS)), 0, budget)
+  return { fragment, nodes: budget.nodes }
+}
+
+function appendTokens(
+  parent: Node,
+  tokens: Token[],
+  depth: number,
+  budget: { nodes: number; truncated: boolean; maximum: number },
+) {
   if (depth >= 40) {
     if (reserve(parent, budget)) {
       parent.appendChild(document.createTextNode(tokens.map((token) => token.raw).join("").slice(0, MAX_TRANSCRIPT_MESSAGE_CHARS)))
     }
     return
   }
-  tokens.forEach((token) => {
-    if (token.type === "space" || token.type === "def") return
-    if (!reserve(parent, budget)) return
+  for (const token of tokens) {
+    if (budget.truncated) break
+    if (token.type === "space" || token.type === "def") continue
+    if (!reserve(parent, budget)) break
     if (token.type === "heading") {
       const heading = document.createElement(`h${Math.min(6, Math.max(1, token.depth))}`)
       appendTokens(heading, token.tokens ?? [], depth + 1, budget)
       parent.appendChild(heading)
-      return
+      continue
     }
     if (token.type === "paragraph") {
       const paragraph = document.createElement("p")
       appendTokens(paragraph, token.tokens ?? [], depth + 1, budget)
       parent.appendChild(paragraph)
-      return
+      continue
     }
     if (token.type === "strong" || token.type === "em" || token.type === "del") {
       const element = document.createElement(token.type === "strong" ? "strong" : token.type === "em" ? "em" : "del")
       appendTokens(element, token.tokens ?? [], depth + 1, budget)
       parent.appendChild(element)
-      return
+      continue
     }
     if (token.type === "codespan") {
       const code = document.createElement("code")
@@ -741,7 +767,7 @@ function appendTokens(parent: Node, tokens: Token[], depth: number, budget: { no
       code.dir = "ltr"
       code.textContent = token.text
       parent.appendChild(code)
-      return
+      continue
     }
     if (token.type === "code") {
       const block = document.createElement("div")
@@ -760,62 +786,62 @@ function appendTokens(parent: Node, tokens: Token[], depth: number, budget: { no
       pre.append(code)
       block.append(pre)
       parent.appendChild(block)
-      return
+      continue
     }
     if (token.type === "list") {
       const value = token as import("marked", { with: { "resolution-mode": "import" } }).Tokens.List
       const list = document.createElement(value.ordered ? "ol" : "ul")
       if (value.ordered && typeof value.start === "number") list.setAttribute("start", String(value.start))
-      value.items.forEach((item) => {
-        if (!reserve(list, budget)) return
+      for (const item of value.items) {
+        if (budget.truncated || !reserve(list, budget)) break
         const row = document.createElement("li")
         appendTokens(row, item.tokens, depth + 1, budget)
         list.append(row)
-      })
+      }
       parent.appendChild(list)
-      return
+      continue
     }
     if (token.type === "blockquote") {
       const quote = document.createElement("blockquote")
       appendTokens(quote, token.tokens ?? [], depth + 1, budget)
       parent.appendChild(quote)
-      return
+      continue
     }
     if (token.type === "hr") {
       parent.appendChild(document.createElement("hr"))
-      return
+      continue
     }
     if (token.type === "br") {
       parent.appendChild(document.createElement("br"))
-      return
+      continue
     }
     if (token.type === "link") {
       const link = document.createElement("span")
       link.className = "markdown-link"
       appendTokens(link, token.tokens ?? [], depth + 1, budget)
       parent.appendChild(link)
-      return
+      continue
     }
     if (token.type === "image") {
       parent.appendChild(document.createTextNode(token.raw))
-      return
+      continue
     }
     if (token.type === "html") {
       parent.appendChild(document.createTextNode(token.raw))
-      return
+      continue
     }
     if (token.type === "text") {
       if (token.tokens?.length) appendTokens(parent, token.tokens, depth + 1, budget)
       else parent.appendChild(document.createTextNode(token.text))
-      return
+      continue
     }
     const unknown = token as import("marked", { with: { "resolution-mode": "import" } }).Tokens.Generic
     parent.appendChild(document.createTextNode(unknown.raw))
-  })
+  }
 }
 
-function reserve(parent: Node, budget: { nodes: number; truncated: boolean }) {
-  if (budget.nodes < MAX_MARKDOWN_NODES) {
+function reserve(parent: Node, budget: { nodes: number; truncated: boolean; maximum: number }) {
+  if (budget.nodes < budget.maximum) {
     budget.nodes++
     return true
   }
