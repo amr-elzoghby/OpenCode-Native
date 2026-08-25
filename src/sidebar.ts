@@ -14,6 +14,7 @@ import {
 } from "vscode"
 import { AttachmentError, AttachmentStore } from "./attachments"
 import {
+  MAX_RECENT_CHATS,
   parseWebviewMessage,
   type ActionMessage,
   type AttachmentAction,
@@ -22,6 +23,7 @@ import {
   type HistorySession,
   type NativeAction,
   type ProviderConnectMessage,
+  type RecentChatsMessage,
   type RollbackResultMessage,
   type SubmissionMessage,
   type UsageMessage,
@@ -54,8 +56,11 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   private deliveryStarted?: { id: number; time: number }
   private historySessions: HistorySession[] = []
   private historyRequests = new RequestGeneration()
+  private historyVisible = false
+  private previousSessionPhase?: ViewState["phase"]
   private attachments?: AttachmentStore
   private attachmentGeneration = 0
+  private attachmentContext = createAttachmentContext()
   private reviewEditor = new ReviewEditor()
   private providerConnectionGate = new ProviderConnectionGate()
   private providerConnections = new ProviderConnectionStore()
@@ -70,12 +75,19 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     this.disposables = [
       new Disposable(
         session.subscribe((state) => {
+          const previousPhase = this.previousSessionPhase
+          this.previousSessionPhase = state.phase
           void commands.executeCommand(
             "setContext",
             "opencode.native.generating",
             state.phase === "loading" || state.phase === "stopping",
           )
           void this.postState()
+          if (
+            state.phase === "ready" &&
+            (previousPhase === "loading" || previousPhase === "stopping" ||
+              previousPhase === "syncing" || previousPhase === "error")
+          ) void this.refreshHistoryProjection()
         }),
       ),
       new Disposable(
@@ -86,10 +98,17 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       window.onDidChangeActiveTextEditor(() => void this.postState()),
       window.onDidChangeTextEditorSelection(() => void this.postState()),
       workspace.onDidChangeWorkspaceFolders(() => {
+        this.advanceAttachmentContext(true)
         this.closeProviderConnection()
+        this.resetHistoryProjection()
         void this.postState()
+        void this.refreshHistoryProjection()
       }),
-      workspace.onDidGrantWorkspaceTrust(() => void this.postState()),
+      workspace.onDidGrantWorkspaceTrust(() => {
+        this.advanceAttachmentContext(true)
+        void this.postState()
+        void this.refreshHistoryProjection()
+      }),
       this.reviewEditor,
     ]
   }
@@ -97,6 +116,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   resolveWebviewView(view: WebviewView) {
     this.view = view
     this.deliveryStarted = undefined
+    this.historyVisible = false
+    this.historyRequests.invalidate()
     const root = Uri.joinPath(this.context.extensionUri, "dist")
     view.webview.options = {
       enableScripts: true,
@@ -122,6 +143,8 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       this.providerConnectionDirectory = undefined
       this.providerConnectionRequests.invalidate()
       this.providerConnectionGate.cancel()
+      this.historyVisible = false
+      this.historyRequests.invalidate()
       void commands.executeCommand("setContext", "opencode.native.sidebarFocused", false)
       void commands.executeCommand("setContext", "opencode.native.composerFocused", false)
     })
@@ -141,14 +164,17 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
 
   async invokeAction(action: NativeAction) {
     if (action === "new") {
+      const folder = this.workspaceFolder()
       if (!this.session.newChat()) return
+      this.historyVisible = false
       this.historyRequests.invalidate()
-      this.attachmentGeneration++
-      this.attachments?.clear()
+      this.historySessions = this.historySessions.map((session) => ({ ...session, current: false }))
+      this.advanceAttachmentContext(true)
       this.closeProviderConnection()
       await this.postHistory({ type: "history", status: "closed", sessions: [] })
       await this.postAction({ type: "action", action })
       await this.postState()
+      if (workspace.isTrusted && folder?.uri.scheme === "file") void this.loadHistory(folder, false, false)
       return
     }
     if (action === "sessions" || action === "refresh") {
@@ -162,6 +188,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         await this.postAction({ type: "action", action })
         return
       }
+      this.historyVisible = true
       await this.postAction({ type: "action", action })
       await this.loadHistory(folder)
       return
@@ -274,7 +301,10 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     if (message.type === "ready") {
       await this.postState()
       const folder = this.workspaceFolder()
-      if (workspace.isTrusted && folder?.uri.scheme === "file") void this.session.prepare(folder.uri.fsPath)
+      if (workspace.isTrusted && folder?.uri.scheme === "file") {
+        void this.session.prepare(folder.uri.fsPath)
+        void this.loadHistory(folder, false, false)
+      }
       return
     }
     if (message.type === "rendered") {
@@ -294,6 +324,10 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     }
     if (message.type === "providerConnectClose") {
       this.closeProviderConnection()
+      return
+    }
+    if (message.type === "historyClose") {
+      this.historyVisible = false
       return
     }
     if (message.type === "invokeAction") {
@@ -345,19 +379,32 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       return
     }
     if (message.type === "selectSession") {
-      this.attachmentGeneration++
-      this.attachments?.clear()
+      this.advanceAttachmentContext(true)
       this.closeProviderConnection()
       if (await this.session.switchSession(message.key)) {
+        this.historyVisible = false
         this.historyRequests.invalidate()
         await this.postHistory({ type: "history", status: "closed", sessions: [] })
+        this.historySessions = this.historySessions.map((session) => ({
+          ...session,
+          current: session.key === message.key,
+        }))
+        void this.loadHistory(folder, false, false)
       } else {
-        await this.postHistory({
-          type: "history",
-          status: "error",
-          sessions: this.historySessions,
-          error: "OpenCode chat could not be opened. The current chat was kept unchanged.",
-        })
+        if (this.historyVisible) {
+          await this.postHistory({
+            type: "history",
+            status: "error",
+            sessions: this.historySessions,
+            error: "OpenCode chat could not be opened. The current chat was kept unchanged.",
+          })
+        } else {
+          await this.postRecentChats({
+            type: "recentChats",
+            status: "error",
+            sessions: this.historySessions.slice(0, MAX_RECENT_CHATS),
+          })
+        }
       }
       return
     }
@@ -503,6 +550,10 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     return this.view?.webview.postMessage(message)
   }
 
+  private postRecentChats(message: RecentChatsMessage) {
+    return this.view?.webview.postMessage(message)
+  }
+
   private postProviderConnect(message: ProviderConnectMessage) {
     return this.view?.webview.postMessage(message)
   }
@@ -558,10 +609,19 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
   }
 
   private attachmentStore(folder: WorkspaceFolder) {
-    if (!this.attachments || this.attachments.boundDirectory() !== folder.uri.fsPath) {
+    if (!this.attachments) {
+      this.attachments = new AttachmentStore(folder.uri.fsPath)
+    } else if (this.attachments.boundDirectory() !== folder.uri.fsPath) {
+      this.advanceAttachmentContext(true)
       this.attachments = new AttachmentStore(folder.uri.fsPath)
     }
     return this.attachments
+  }
+
+  private advanceAttachmentContext(clear: boolean) {
+    this.attachmentGeneration++
+    this.attachmentContext = createAttachmentContext()
+    if (clear) this.attachments?.clear()
   }
 
   private async addAttachment(folder: WorkspaceFolder, action: AttachmentAction) {
@@ -1071,18 +1131,53 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     ].join(" · "))
   }
 
-  private async loadHistory(folder: WorkspaceFolder, loading = true) {
+  private async loadHistory(folder: WorkspaceFolder, loading = true, publishHistory = true) {
     const generation = this.historyRequests.begin()
-    if (loading) await this.postHistory({ type: "history", status: "loading", sessions: [] })
+    await this.postRecentChats({
+      type: "recentChats",
+      status: "loading",
+      sessions: this.historySessions.slice(0, MAX_RECENT_CHATS),
+    })
+    if (loading && publishHistory && this.historyVisible) {
+      await this.postHistory({ type: "history", status: "loading", sessions: [] })
+    }
     try {
       const sessions = await this.session.listHistory(folder.uri.fsPath)
       if (!this.historyRequests.accepts(generation)) return
       this.historySessions = sessions
-      await this.postHistory({ type: "history", status: "ready", sessions })
+      await this.postRecentChats({
+        type: "recentChats",
+        status: "ready",
+        sessions: sessions.slice(0, MAX_RECENT_CHATS),
+      })
+      if (publishHistory && this.historyVisible) {
+        await this.postHistory({ type: "history", status: "ready", sessions })
+      }
     } catch {
       if (!this.historyRequests.accepts(generation)) return
-      await this.historyError("OpenCode chat history could not be loaded.")
+      await this.postRecentChats({
+        type: "recentChats",
+        status: "error",
+        sessions: this.historySessions.slice(0, MAX_RECENT_CHATS),
+      })
+      if (publishHistory && this.historyVisible) {
+        await this.historyError("OpenCode chat history could not be loaded.")
+      }
     }
+  }
+
+  private refreshHistoryProjection() {
+    const folder = this.workspaceFolder()
+    if (!this.view || !workspace.isTrusted || folder?.uri.scheme !== "file") return
+    return this.loadHistory(folder, false, this.historyVisible)
+  }
+
+  private resetHistoryProjection() {
+    this.historyRequests.invalidate()
+    this.historyVisible = false
+    this.historySessions = []
+    void this.postHistory({ type: "history", status: "closed", sessions: [] })
+    void this.postRecentChats({ type: "recentChats", status: "closed", sessions: [] })
   }
 
   private historyError(error: string) {
@@ -1099,6 +1194,10 @@ function currentWorkspaceFolder() {
 
 function attachmentError(error: unknown) {
   return error instanceof AttachmentError ? error.message : "OpenCode could not add that context attachment."
+}
+
+function createAttachmentContext() {
+  return randomBytes(18).toString("base64url")
 }
 
 function attachmentBusy(phase: ViewState["phase"]) {
@@ -1224,6 +1323,20 @@ function html(webview: Webview, script: Uri, language: string) {
       .provider-connect-method > span:last-child { color: var(--vscode-descriptionForeground); font-size: 10px; }
       .provider-connect-method:hover:not(:disabled), .provider-connect-method:focus-visible { border-color: var(--opencode-accent-border); background: var(--vscode-list-hoverBackground); }
       .transcript-shell { position: relative; min-height: 0; }
+      #recent-chats { position: absolute; z-index: 4; inset-block-start: 12px; inset-inline: 12px; max-height: calc(100% - 24px); display: grid; gap: 3px; overflow-y: auto; padding: 2px; background: color-mix(in srgb, var(--vscode-sideBar-background) 96%, transparent); }
+      #recent-chats h2 { margin: 0 4px 4px; font-size: 12px; font-weight: 600; }
+      .recent-chat-list { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
+      .recent-chat-open { width: 100%; min-height: 34px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 6px 5px; border: 1px solid transparent; border-radius: 5px; color: var(--vscode-foreground); background: transparent; text-align: start; cursor: pointer; }
+      .recent-chat-open:hover:not(:disabled), .recent-chat-open:focus-visible { border-color: color-mix(in srgb, var(--vscode-widget-border) 72%, transparent); background: var(--vscode-list-hoverBackground); outline: none; }
+      .recent-chat-open[aria-current="page"] { border-inline-start-color: var(--opencode-accent-border); }
+      .recent-chat-open:disabled { cursor: default; opacity: .65; }
+      .recent-chat-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: plaintext; }
+      .recent-chat-detail { color: var(--vscode-descriptionForeground); font-size: 10px; white-space: nowrap; }
+      .recent-chat-status { min-height: 0; margin: 0 5px; color: var(--vscode-descriptionForeground); font-size: 10px; }
+      .recent-chat-status:empty { display: none; }
+      .recent-chat-view-all { justify-self: start; min-height: 26px; padding: 2px 5px; border: 0; border-radius: 4px; color: var(--vscode-descriptionForeground); background: transparent; text-align: start; cursor: pointer; }
+      .recent-chat-view-all:hover:not(:disabled), .recent-chat-view-all:focus-visible { color: var(--opencode-accent); background: var(--vscode-toolbar-hoverBackground); outline: 1px solid var(--opencode-accent-border); }
+      .recent-chat-view-all:disabled { cursor: default; opacity: .65; }
       #empty-brand { position: absolute; z-index: 0; inset: 0; display: grid; place-items: center; pointer-events: none; }
       #empty-brand svg { width: min(360px, 82%); height: auto; }
       #empty-brand .native-brand { opacity: 0.72; }
@@ -1468,6 +1581,7 @@ function html(webview: Webview, script: Uri, language: string) {
       <section class="provider-connect" id="provider-connect" role="dialog" aria-modal="true" aria-label="Connect an AI provider" hidden></section>
       <div class="usage-control" id="usage" aria-label="Chat token details" hidden></div>
       <div class="transcript-shell">
+        <section id="recent-chats" hidden></section>
         <!-- OpenCode Native brand mark; the wide viewBox preserves the existing empty-state footprint. -->
         <div id="empty-brand" aria-hidden="true">
           <svg viewBox="0 0 640 115">

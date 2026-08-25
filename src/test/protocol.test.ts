@@ -1,5 +1,6 @@
 import { deepEqual, equal } from "node:assert/strict"
 import {
+  MAX_RECENT_CHATS,
   MAX_ROLLED_BACK_MESSAGES,
   MAX_ROLLED_BACK_PREVIEW_CHARS,
   MAX_TRANSCRIPT_MESSAGE_CHARS,
@@ -10,6 +11,7 @@ import {
   parseComposerMessage,
   parseHistoryMessage,
   parseProviderConnectMessage,
+  parseRecentChatsMessage,
   parseRollbackResultMessage,
   parseStateMessage,
   parseSubmissionMessage,
@@ -75,6 +77,8 @@ describe("Webview request protocol", () => {
       type: "invokeAction",
       action: "sessions",
     })
+    deepEqual(parseWebviewMessage({ type: "historyClose" }), { type: "historyClose" })
+    equal(parseWebviewMessage({ type: "historyClose", command: "workbench.action.reloadWindow" }), undefined)
     equal(parseWebviewMessage({ type: "invokeAction", action: "new", command: "workbench.action.reloadWindow" }), undefined)
     deepEqual(parseActionMessage({ type: "action", action: "sessions" }), {
       type: "action",
@@ -108,6 +112,57 @@ describe("Webview request protocol", () => {
       sessions: [{ key, title: "Safe chat", updated: 100, current: true, status: "idle" }],
     })?.sessions[0], { key, title: "Safe chat", updated: 100, current: true, status: "idle" })
     equal(parseHistoryMessage({ type: "history", status: "ready", sessions: [{ key, title: "Bad" }] }), undefined)
+  })
+
+  it("bounds and validates the recent-chat projection independently", () => {
+    const sessions = Array.from({ length: MAX_RECENT_CHATS }, (_, index) => ({
+      key: `opaque_recent_session_${index}`,
+      title: index === 0 ? "مراجعة OpenCode Native" : `Safe chat ${index}`,
+      updated: 100 - index,
+      current: index === 0,
+    }))
+    deepEqual(parseRecentChatsMessage({ type: "recentChats", status: "ready", sessions })?.sessions, sessions)
+    deepEqual(parseRecentChatsMessage({ type: "recentChats", status: "closed", sessions: [] }), {
+      type: "recentChats",
+      status: "closed",
+      sessions: [],
+    })
+    equal(parseRecentChatsMessage({
+      type: "recentChats",
+      status: "ready",
+      sessions: [...sessions, { key: "opaque_recent_session_4", title: "Fourth", updated: 1, current: false }],
+    }), undefined)
+    equal(parseRecentChatsMessage({
+      type: "recentChats",
+      status: "ready",
+      sessions: [{ ...sessions[0]!, key: "ses_raw" }],
+    }), undefined)
+    equal(parseRecentChatsMessage({
+      type: "recentChats",
+      status: "ready",
+      sessions: [{ ...sessions[0]!, updated: -1 }],
+    }), undefined)
+    equal(parseRecentChatsMessage({
+      type: "recentChats",
+      status: "ready",
+      sessions: [{ ...sessions[0]!, title: "safe\u202eevil" }],
+    }), undefined)
+    equal(parseRecentChatsMessage({
+      type: "recentChats",
+      status: "ready",
+      sessions: [sessions[0], { ...sessions[1]!, current: true }],
+    }), undefined)
+    equal(parseRecentChatsMessage({
+      type: "recentChats",
+      status: "ready",
+      sessions: [sessions[0], { ...sessions[1]!, key: sessions[0]!.key }],
+    }), undefined)
+    equal(parseRecentChatsMessage({
+      type: "recentChats",
+      status: "closed",
+      sessions: [sessions[0]],
+    }), undefined)
+    equal(parseRecentChatsMessage({ type: "recentChats", status: "ready", sessions: [], extra: true }), undefined)
   })
 
   it("accepts only opaque rollback restoration keys", () => {

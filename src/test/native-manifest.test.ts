@@ -86,6 +86,27 @@ describe("Native command wiring", () => {
     equal(sidebar.includes("scrollbarSlider-activeBackground"), true)
   })
 
+  it("shows only three safe recent chats in the empty transcript state", () => {
+    const sidebar = readFileSync(join(root, "src", "sidebar.ts"), "utf8")
+    const webview = readFileSync(join(root, "src", "webview.ts"), "utf8")
+    const recent = readFileSync(join(root, "src", "webview-recent-chats.ts"), "utf8")
+    const protocol = readFileSync(join(root, "src", "protocol.ts"), "utf8")
+    equal(sidebar.indexOf('id="recent-chats"') < sidebar.indexOf('id="transcript"'), true)
+    equal(sidebar.includes("sessions: sessions.slice(0, MAX_RECENT_CHATS)"), true)
+    equal(sidebar.includes("this.resetHistoryProjection()"), true)
+    equal(webview.includes("recentChats.update(messages.length === 0, controlsDisabled)"), true)
+    equal(webview.includes('viewAll: () => invokeAction("sessions")'), true)
+    equal(recent.includes("MAX_RECENT_CHATS"), true)
+    equal(recent.includes("name.textContent = session.title"), true)
+    equal(recent.includes('name.dir = "auto"'), true)
+    equal(recent.includes('detail.dir = "ltr"'), true)
+    equal(recent.includes("opening = true"), true)
+    equal(recent.includes("innerHTML"), false)
+    equal(recent.includes("localStorage"), false)
+    equal(recent.includes("sessionID"), false)
+    equal(protocol.includes("MAX_RECENT_CHATS = 3"), true)
+  })
+
   it("keeps OpenCode auth and provider configuration behind the Extension Host SDK", () => {
     const session = readFileSync(join(root, "src", "session.ts"), "utf8")
     const webview = readFileSync(join(root, "src", "webview.ts"), "utf8")

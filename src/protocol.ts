@@ -22,6 +22,7 @@ export const MAX_TRANSCRIPT_MESSAGE_CHARS = 256_000
 export const MAX_TRANSCRIPT_TOTAL_CHARS = 2_000_000
 export const MAX_TRANSCRIPT_DELTA_CHARS = 32_000
 export const MAX_HISTORY_SESSIONS = 200
+export const MAX_RECENT_CHATS = 3
 
 export const NATIVE_ACTIONS = [
   "new",
@@ -196,6 +197,9 @@ export type HistoryMessage =
   | { type: "history"; status: "loading" | "closed"; sessions: [] }
   | { type: "history"; status: "ready"; sessions: HistorySession[] }
   | { type: "history"; status: "error"; sessions: HistorySession[]; error: string }
+export type RecentChatsMessage =
+  | { type: "recentChats"; status: "closed"; sessions: [] }
+  | { type: "recentChats"; status: "loading" | "ready" | "error"; sessions: HistorySession[] }
 
 export type ProviderConnectMessage =
   | { type: "providerConnect"; status: "closed" }
@@ -224,6 +228,7 @@ export type WebviewMessage =
   | { type: "ready" }
   | { type: "sidebarFocus"; focused: boolean }
   | { type: "invokeAction"; action: NativeAction }
+  | { type: "historyClose" }
   | { type: "providerConnectClose" }
   | { type: "selectProviderConnection"; key: string }
   | { type: "selectProviderMethod"; key: string }
@@ -322,6 +327,7 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
   const item = record(value)
   if (!item || typeof item.type !== "string") return
   if (item.type === "ready" && exactKeys(item, ["type"])) return { type: "ready" }
+  if (item.type === "historyClose" && exactKeys(item, ["type"])) return { type: "historyClose" }
   if (item.type === "providerConnectClose" && exactKeys(item, ["type"])) return { type: "providerConnectClose" }
   if (
     item.type === "selectProviderConnection" && exactKeys(item, ["type", "key"]) && validOpaqueKey(item.key)
@@ -496,7 +502,21 @@ export function parseHistoryMessage(value: unknown): HistoryMessage | undefined 
     exactKeys(item, ["type", "status", "sessions", "error"]) &&
     safeString(item.error, 10_000)
   ) {
-    return { type: "history", status: "error", sessions: item.sessions as HistorySession[], error: item.error }
+    return { type: "history", status: "error", sessions, error: item.error }
+  }
+}
+
+export function parseRecentChatsMessage(value: unknown): RecentChatsMessage | undefined {
+  const item = record(value)
+  if (!item || item.type !== "recentChats" || !safeArray(item.sessions, isHistorySession) ||
+    (item.sessions as unknown[]).length > MAX_RECENT_CHATS) return
+  const sessions = item.sessions as HistorySession[]
+  if (!validHistoryProjection(sessions) || !exactKeys(item, ["type", "status", "sessions"])) return
+  if (item.status === "closed" && sessions.length === 0) {
+    return { type: "recentChats", status: "closed", sessions: [] }
+  }
+  if (item.status === "loading" || item.status === "ready" || item.status === "error") {
+    return { type: "recentChats", status: item.status, sessions }
   }
 }
 

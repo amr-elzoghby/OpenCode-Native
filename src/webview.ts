@@ -7,6 +7,7 @@ import { createAttachments } from "./webview-attachments"
 import { createPermissions } from "./webview-permissions"
 import { createQuestions } from "./webview-questions"
 import { createProviderConnect } from "./webview-connect"
+import { createRecentChats } from "./webview-recent-chats"
 import { createUsage } from "./webview-usage"
 import { createRollbackDock } from "./webview-rollback"
 import { parseActionMessage, parseComposerMessage, parseRollbackResultMessage, parseStateMessage, parseSubmissionMessage, parseUsageMessage, type NativeAction, type ViewState } from "./protocol"
@@ -18,6 +19,7 @@ const composer = required<HTMLFormElement>("#composer")
 const prompt = required<HTMLTextAreaElement>("#prompt")
 const transcript = required<HTMLElement>("#transcript")
 const transcriptShell = required<HTMLElement>(".transcript-shell")
+const recentChatsRoot = required<HTMLElement>("#recent-chats")
 const stickyPrompt = required<HTMLButtonElement>("#sticky-prompt")
 const commandRoot = required<HTMLElement>("#command-menu")
 const historyRoot = required<HTMLElement>("#history")
@@ -64,10 +66,16 @@ const commands = createCommandMenu(commandRoot, prompt, invokeAction, runDynamic
   status.textContent = `/${name} is not available in Native: ${note}`
   announcer.textContent = `/${name} is unavailable in OpenCode Native.`
 })
+const recentChats = createRecentChats(recentChatsRoot, {
+  select: (key) => vscode.postMessage({ type: "selectSession", key }),
+  viewAll: () => invokeAction("sessions"),
+  restoreFocus: () => prompt.focus(),
+})
 const history = createHistory(historyRoot, {
   select: (key) => vscode.postMessage({ type: "selectSession", key }),
   rename: (key, title) => vscode.postMessage({ type: "renameSession", key, title }),
   delete: (key) => vscode.postMessage({ type: "deleteSession", key }),
+  close: () => vscode.postMessage({ type: "historyClose" }),
 }, [transcriptShell, composer, permissionRoot, questionRoot, rollbackRoot, usageRoot])
 const timeline = createTimeline(
   timelineRoot,
@@ -155,6 +163,7 @@ prompt.addEventListener("input", () => {
 })
 
 window.addEventListener("message", (event) => {
+  if (recentChats.apply(event.data)) return
   if (history.apply(event.data)) return
   if (providerConnect.apply(event.data)) return
   const usageMessage = parseUsageMessage(event.data)
@@ -345,6 +354,7 @@ function render(state: ViewState) {
         : item.label),
     }]
     : state.messages
+  recentChats.update(messages.length === 0, controlsDisabled)
   emptyBrand.hidden = messages.length > 0
   usage.update(state.sessionUsage)
   transcriptView.render(messages, state.reviews, state.activities, {

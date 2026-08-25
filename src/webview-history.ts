@@ -4,6 +4,7 @@ export function createHistory(root: HTMLElement, actions: {
   select(key: string): void
   rename(key: string, title: string): void
   delete(key: string): void
+  close(): void
 }, background: HTMLElement[]) {
   root.setAttribute("role", "dialog")
   root.setAttribute("aria-modal", "true")
@@ -47,12 +48,12 @@ export function createHistory(root: HTMLElement, actions: {
   let previousFocus: HTMLElement | undefined
   let accepting = false
 
-  close.addEventListener("click", () => hide())
+  close.addEventListener("click", () => hide(true))
   search.addEventListener("input", () => render())
   root.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault()
-      hide()
+      hide(true)
       return
     }
     if (event.key !== "Tab") return
@@ -92,13 +93,13 @@ export function createHistory(root: HTMLElement, actions: {
       return !root.hidden
     },
     close() {
-      hide()
+      hide(true)
     },
   }
 
   function apply(message: HistoryMessage) {
     if (message.status === "closed") {
-      hide()
+      hide(false)
       return
     }
     show()
@@ -178,7 +179,7 @@ export function createHistory(root: HTMLElement, actions: {
     input.select()
   }
 
-  function hide() {
+  function hide(notify: boolean) {
     accepting = false
     if (root.hidden) return
     root.hidden = true
@@ -189,6 +190,7 @@ export function createHistory(root: HTMLElement, actions: {
     })
     previousFocus?.focus()
     previousFocus = undefined
+    if (notify) actions.close()
   }
 
   function show() {
