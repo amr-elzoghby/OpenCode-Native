@@ -1227,7 +1227,12 @@ function html(webview: Webview, script: Uri, language: string) {
       #empty-brand { position: absolute; z-index: 0; inset: 0; display: grid; place-items: center; pointer-events: none; }
       #empty-brand svg { width: min(360px, 82%); height: auto; }
       #empty-brand .native-brand { opacity: 0.72; }
-      #transcript { position: absolute; inset: 0; overflow-y: auto; padding: 10px 11px 22px; scrollbar-gutter: stable; }
+      #transcript { position: absolute; inset: 0; overflow-y: auto; padding: 10px 11px 22px; scrollbar-color: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, .55)) transparent; scrollbar-gutter: stable; scrollbar-width: auto; }
+      #transcript::-webkit-scrollbar { width: 12px; }
+      #transcript::-webkit-scrollbar-track { background: transparent; }
+      #transcript::-webkit-scrollbar-thumb { min-height: 36px; border: 2px solid transparent; border-radius: 7px; background: var(--vscode-scrollbarSlider-background, rgba(121, 121, 121, .55)); background-clip: padding-box; }
+      #transcript::-webkit-scrollbar-thumb:hover { background-color: var(--vscode-scrollbarSlider-hoverBackground, rgba(100, 100, 100, .75)); }
+      #transcript::-webkit-scrollbar-thumb:active { background-color: var(--vscode-scrollbarSlider-activeBackground, rgba(85, 85, 85, .9)); }
       #sticky-prompt { position: absolute; z-index: 10; inset-block-start: 7px; inset-inline: 9px; width: calc(100% - 18px); max-height: 42px; overflow: hidden; padding: 6px 9px; border: 1px solid var(--opencode-accent-border); border-inline-start-width: 2px; border-radius: 7px; color: var(--vscode-foreground); background: var(--vscode-sideBar-background); box-shadow: 0 5px 16px var(--vscode-widget-shadow); text-align: start; cursor: pointer; line-height: 1.35; white-space: nowrap; text-overflow: ellipsis; unicode-bidi: plaintext; }
       #sticky-prompt:hover { background: var(--vscode-toolbar-hoverBackground); }
       .context { direction: ltr; unicode-bidi: isolate; font-family: var(--vscode-editor-font-family); }

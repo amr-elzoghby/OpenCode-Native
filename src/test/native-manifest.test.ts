@@ -77,6 +77,15 @@ describe("Native command wiring", () => {
     equal(usage.includes("formatPercent"), false)
   })
 
+  it("keeps a visible draggable native scrollbar on the transcript", () => {
+    const sidebar = readFileSync(join(root, "src", "sidebar.ts"), "utf8")
+    equal(sidebar.includes("overflow-y: auto"), true)
+    equal(sidebar.includes("scrollbar-gutter: stable"), true)
+    equal(sidebar.includes("#transcript::-webkit-scrollbar { width: 12px; }"), true)
+    equal(sidebar.includes("#transcript::-webkit-scrollbar-thumb"), true)
+    equal(sidebar.includes("scrollbarSlider-activeBackground"), true)
+  })
+
   it("keeps OpenCode auth and provider configuration behind the Extension Host SDK", () => {
     const session = readFileSync(join(root, "src", "session.ts"), "utf8")
     const webview = readFileSync(join(root, "src", "webview.ts"), "utf8")
