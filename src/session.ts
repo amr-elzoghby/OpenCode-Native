@@ -116,6 +116,7 @@ type Attempt = {
 const REVIEW_DIFF_ATTEMPTS = 4
 const REVIEW_DIFF_RETRY_MS = 50
 const MAX_QUEUED_MESSAGE_EVENT_CHARS = 64_000
+const HISTORY_LIST_ATTEMPTS = 3
 
 type HydratedSession = {
   session: SessionInfo
@@ -154,6 +155,8 @@ export class SessionController {
   private submitting?: Promise<boolean>
   private disposing?: Promise<void>
   private transitioning?: Promise<boolean>
+  private historyListing?: { attempt: Attempt; promise: Promise<HistorySession[]> }
+  private historyRevision = 0
   private renderTimer?: ReturnType<typeof setTimeout>
   private promptBusy = false
   private mutationBusy = false
@@ -567,6 +570,7 @@ export class SessionController {
       )
       const updated = parseSession(response.data)
       if (!updated || updated.id !== sessionID || updated.title !== title || !this.currentAttempt(attempt, generation)) return false
+      this.historyRevision++
       this.update({ error: undefined })
       return true
     })
@@ -678,6 +682,7 @@ export class SessionController {
         selection: resolveSelection(attempt.catalog, selectionForSession(hydrated.session, this.state.selection)),
       }
       this.flushRender()
+      this.historyRevision++
       this.update({ phase: "ready", error: undefined })
       return true
     }, "Wait for the current OpenCode response before forking this chat.")
@@ -837,15 +842,34 @@ export class SessionController {
   async listHistory(directory: string): Promise<HistorySession[]> {
     const attempt = await this.ensureStarted(directory)
     if (!attempt.client) throw new Error("OpenCode session is unavailable.")
+    const current = this.historyListing
+    if (current?.attempt === attempt) return current.promise
     attempt.history ??= new SessionHistory(attempt.directory)
-    const [sessions, statuses] = await Promise.all([
-      attempt.client.session.list(
-        { directory: attempt.directory, roots: true, limit: 200 },
-        { signal: attempt.abort.signal },
-      ),
-      attempt.client.session.status({ directory: attempt.directory }, { signal: attempt.abort.signal }),
-    ])
-    return attempt.history.replace(sessions.data, statuses.data, attempt.sessionID)
+    const promise = (async () => {
+      for (let refresh = 0; refresh < HISTORY_LIST_ATTEMPTS; refresh++) {
+        const revision = this.historyRevision
+        const [sessions, statuses] = await Promise.all([
+          attempt.client!.session.list(
+            { directory: attempt.directory, roots: true, limit: 200 },
+            { signal: attempt.abort.signal },
+          ),
+          attempt.client!.session.status({ directory: attempt.directory }, { signal: attempt.abort.signal }),
+        ])
+        if (this.attempt !== attempt || attempt.abort.signal.aborted) {
+          throw new Error("OpenCode history changed while it was loading.")
+        }
+        if (revision !== this.historyRevision) continue
+        return attempt.history!.replace(sessions.data, statuses.data, attempt.sessionID)
+      }
+      throw new Error("OpenCode history kept changing while it was loading.")
+    })()
+    const listing = { attempt, promise }
+    this.historyListing = listing
+    try {
+      return await promise
+    } finally {
+      if (this.historyListing === listing) this.historyListing = undefined
+    }
   }
 
   sessionTitle(key: string) {
@@ -871,6 +895,7 @@ export class SessionController {
         if (!session || !attempt.history!.accepts(session) || session.title !== title) {
           throw new Error("OpenCode did not confirm the renamed chat.")
         }
+        this.historyRevision++
         this.update({ error: undefined })
         return true
       } catch {
@@ -892,6 +917,7 @@ export class SessionController {
           { signal: attempt.abort.signal },
         )
         if (deleted.data !== true) throw new Error("OpenCode did not confirm the deleted chat.")
+        this.historyRevision++
         if (current) this.resetToNewChat(attempt)
         this.update({ error: undefined })
         return true
@@ -1362,6 +1388,7 @@ export class SessionController {
     attempt.revertMessageID = undefined
     attempt.sessionUsage = session.usage
     attempt.reviewMessageID = undefined
+    this.historyRevision++
     this.timing(`session created in ${duration(started)}`)
     this.reviewEpoch++
     this.transcript = new Transcript(attempt.directory)
@@ -1398,10 +1425,19 @@ export class SessionController {
 
   private applyEvent(attempt: Attempt, event: GlobalEvent) {
     const payload = event.payload
+    if (payload.type === "session.created") {
+      const session = parseSession(payload.properties.info)
+      attempt.history ??= new SessionHistory(attempt.directory)
+      if (!session || session.id !== payload.properties.sessionID || !attempt.history.belongs(session)) return
+      this.historyRevision++
+      return
+    }
     if (payload.type === "session.updated") {
       const session = parseSession(payload.properties.info)
       attempt.history ??= new SessionHistory(attempt.directory)
-      if (!session || session.id !== attempt.sessionID || !attempt.history.accepts(session)) return
+      if (!session || session.id !== payload.properties.sessionID || !attempt.history.belongs(session)) return
+      this.historyRevision++
+      if (session.id !== attempt.sessionID || !attempt.history.accepts(session)) return
       const revertChanged = attempt.revertMessageID !== session.revert?.messageID
       if (revertChanged) {
         const sessionID = session.id
@@ -1538,8 +1574,12 @@ export class SessionController {
       void this.reconcile(attempt)
       return
     }
-    if (payload.type === "session.deleted" && payload.properties.sessionID === attempt.sessionID) {
-      this.resetToNewChat(attempt)
+    if (payload.type === "session.deleted") {
+      const session = parseSession(payload.properties.info)
+      attempt.history ??= new SessionHistory(attempt.directory)
+      if (!session || session.id !== payload.properties.sessionID || !attempt.history.belongs(session)) return
+      this.historyRevision++
+      if (payload.properties.sessionID === attempt.sessionID) this.resetToNewChat(attempt)
     }
   }
 
@@ -2064,6 +2104,7 @@ export class SessionController {
     this.permissions.clear()
     this.questions.clear()
     this.flushRender()
+    this.historyRevision++
     this.update({ phase: "ready", error: undefined })
     return true
   }
@@ -2275,7 +2316,11 @@ function sessionIsActive(value: unknown, sessionID: string) {
 }
 
 function eventSessionID(event: GlobalEvent) {
-  if (event.payload.type === "session.updated") return event.payload.properties.info.id
+  if (event.payload.type === "session.updated") {
+    return event.payload.properties.info.id === event.payload.properties.sessionID
+      ? event.payload.properties.sessionID
+      : undefined
+  }
   if (event.payload.type === "message.updated") return event.payload.properties.info.sessionID
   if (event.payload.type === "message.part.updated") return event.payload.properties.part.sessionID
   const properties = record(record(event.payload)?.properties)

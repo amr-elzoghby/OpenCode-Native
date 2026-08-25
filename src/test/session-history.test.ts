@@ -52,6 +52,21 @@ describe("workspace session history", () => {
     equal(history.resolve("opaque_session_key_201"), undefined)
   })
 
+  it("deduplicates malformed Core rows by session ID before projecting opaque keys", () => {
+    const history = new SessionHistory(directory, keys())
+    const projected = history.replace([
+      session("duplicate", directory, "Older duplicate", 100),
+      session("other", directory, "Other chat", 150),
+      session("duplicate", directory, "Newest canonical duplicate", 200),
+    ], {}, "duplicate")
+
+    deepEqual(projected.map((item) => ({ title: item.title, current: item.current })), [
+      { title: "Newest canonical duplicate", current: true },
+      { title: "Other chat", current: false },
+    ])
+    equal(new Set(projected.map((item) => item.key)).size, 2)
+  })
+
   it("detects a session version race", () => {
     const first = session("same", directory, "Chat", 100)
     equal(sameSessionVersion(first, { ...first, time: { ...first.time, updated: 101 } }), false)

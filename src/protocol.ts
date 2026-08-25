@@ -481,13 +481,15 @@ export function parseHistoryMessage(value: unknown): HistoryMessage | undefined 
   const item = record(value)
   if (!item || item.type !== "history" || !safeArray(item.sessions, isHistorySession) ||
     (item.sessions as unknown[]).length > MAX_HISTORY_SESSIONS) return
+  const sessions = item.sessions as HistorySession[]
+  if (!validHistoryProjection(sessions)) return
   if (
     (item.status === "loading" || item.status === "closed") &&
     exactKeys(item, ["type", "status", "sessions"]) &&
-    (item.sessions as unknown[]).length === 0
+    sessions.length === 0
   ) return { type: "history", status: item.status, sessions: [] }
   if (item.status === "ready" && exactKeys(item, ["type", "status", "sessions"])) {
-    return { type: "history", status: "ready", sessions: item.sessions as HistorySession[] }
+    return { type: "history", status: "ready", sessions }
   }
   if (
     item.status === "error" &&
@@ -701,9 +703,16 @@ function isHistorySession(value: unknown): value is HistorySession {
   const item = record(value)
   return !!item &&
     (exactKeys(item, ["key", "title", "updated", "current"]) || exactKeys(item, ["key", "title", "updated", "current", "status"])) &&
-    validOpaqueKey(item.key) && safeString(item.title, 200) && typeof item.updated === "number" &&
-    Number.isFinite(item.updated) && typeof item.current === "boolean" &&
+    validOpaqueKey(item.key) && safeString(item.title, 200) && item.title.length > 0 &&
+    !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(item.title) &&
+    Number.isSafeInteger(item.updated) && Number(item.updated) >= 0 && Number(item.updated) <= 8_640_000_000_000_000 &&
+    typeof item.current === "boolean" &&
     (!("status" in item) || item.status === undefined || item.status === "idle" || item.status === "busy" || item.status === "retry")
+}
+
+function validHistoryProjection(sessions: HistorySession[]) {
+  return new Set(sessions.map((session) => session.key)).size === sessions.length &&
+    sessions.filter((session) => session.current).length <= 1
 }
 
 function isReview(value: unknown): value is ViewState["reviews"][number] {

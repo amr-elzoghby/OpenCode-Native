@@ -30,6 +30,7 @@ export class SessionHistory {
   replace(value: unknown, statuses: unknown, currentID?: string) {
     const statusMap = record(statuses)
     const next = new Map<string, SessionInfo>()
+    const seen = new Set<string>()
     const candidates = array(value)
       .slice(0, MAX_HISTORY_SCAN)
       .flatMap((item) => {
@@ -38,6 +39,11 @@ export class SessionHistory {
         return [{ session, status: historyStatus(record(statusMap?.[session.id])?.type) }]
       })
       .sort((a, b) => b.session.time.updated - a.session.time.updated)
+      .filter(({ session }) => {
+        if (seen.has(session.id)) return false
+        seen.add(session.id)
+        return true
+      })
       .slice(0, MAX_HISTORY_SESSIONS)
     const projected = candidates.map(({ session, status }) => {
       const key = uniqueKey(next, this.createKey)
@@ -64,8 +70,11 @@ export class SessionHistory {
   }
 
   accepts(session: SessionInfo) {
-    return !session.parentID && session.time.archived === undefined &&
-      normalizeDirectory(session.directory) === this.directory
+    return this.belongs(session) && session.time.archived === undefined
+  }
+
+  belongs(session: SessionInfo) {
+    return !session.parentID && normalizeDirectory(session.directory) === this.directory
   }
 }
 

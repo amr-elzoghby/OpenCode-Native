@@ -227,7 +227,7 @@ describe("atomic session transitions", () => {
     internal.applyEvent(internal.attempt!, {
       payload: {
         type: "session.updated",
-        properties: { info: { ...info("old", 3), revert: { messageID: "user-2" } } },
+        properties: { sessionID: "old", info: { ...info("old", 3), revert: { messageID: "user-2" } } },
       },
     } as never)
 
@@ -300,7 +300,7 @@ describe("atomic session transitions", () => {
       yield {
         payload: {
           type: "session.updated",
-          properties: { info: { ...info("old", 10), revert: { messageID: "user-2" } } },
+          properties: { sessionID: "old", info: { ...info("old", 10), revert: { messageID: "user-2" } } },
         },
       } as never
       await streamEnd.promise
@@ -381,7 +381,7 @@ describe("atomic session transitions", () => {
     internal.attempt!.pendingEvents!.events.push({
       payload: {
         type: "session.updated",
-        properties: { info: { ...info("old", 3), revert: { messageID: "user-2" } } },
+        properties: { sessionID: "old", info: { ...info("old", 3), revert: { messageID: "user-2" } } },
       },
     } as never)
     hydration.resolve({ session: info("old", 2), transcript: transcript("stale pre-revert") })
@@ -468,7 +468,7 @@ describe("atomic session transitions", () => {
     internal.attempt!.pendingEvents!.events.push({
       payload: {
         type: "session.updated",
-        properties: { info: { ...info("target", 3), revert: { messageID: "user-2" } } },
+        properties: { sessionID: "target", info: { ...info("target", 3), revert: { messageID: "user-2" } } },
       },
     } as never)
     hydration.resolve({ session: target, transcript: transcript("stale target") })
@@ -592,6 +592,157 @@ describe("canonical session mutations", () => {
     equal((await session.listHistory("/workspace"))[0]?.title, initial.title)
     listed = generated
     equal((await session.listHistory("/workspace"))[0]?.title, generated.title)
+  })
+
+  it("coalesces concurrent History refreshes so their opaque keys stay stable", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const listing = deferred<{ data: SessionInfo[] }>()
+    let listCalls = 0
+    let statusCalls = 0
+    internal.attempt!.client = {
+      session: {
+        list: async () => {
+          listCalls++
+          return listing.promise
+        },
+        status: async () => {
+          statusCalls++
+          return { data: {} }
+        },
+      },
+    }
+
+    const first = session.listHistory("/workspace")
+    const second = session.listHistory("/workspace")
+    await Promise.resolve()
+    equal(listCalls, 1)
+    equal(statusCalls, 1)
+    listing.resolve({ data: [info("old", 2)] })
+    const [firstProjection, secondProjection] = await Promise.all([first, second])
+
+    deepEqual(secondProjection, firstProjection)
+    equal(firstProjection.length, 1)
+    equal(session.sessionTitle(firstProjection[0]!.key), "old")
+  })
+
+  it("retries a coalesced History refresh after a confirmed session mutation", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const target = info("old", 1)
+    const renamed = { ...target, title: "Renamed chat", time: { created: 1, updated: 2 } }
+    const history = new SessionHistory("/workspace", keys())
+    const key = history.replace([target], {}, "old")[0]!.key
+    const firstListing = deferred<{ data: SessionInfo[] }>()
+    let listCalls = 0
+    internal.attempt!.history = history
+    internal.attempt!.client = {
+      session: {
+        list: async () => {
+          listCalls++
+          return listCalls === 1 ? firstListing.promise : { data: [renamed] }
+        },
+        status: async () => ({ data: {} }),
+        get: async () => ({ data: target }),
+        update: async () => ({ data: renamed }),
+      },
+    }
+
+    const refreshing = session.listHistory("/workspace")
+    await Promise.resolve()
+    equal(await session.renameSession(key, "Renamed chat"), true)
+    firstListing.resolve({ data: [target] })
+    const projected = await refreshing
+
+    equal(listCalls, 2)
+    equal(projected[0]?.title, "Renamed chat")
+  })
+
+  it("retries History when the TUI updates another session in the same workspace", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const stale = info("other", 1)
+    const updated = { ...stale, title: "Updated by TUI", time: { created: 1, updated: 2 } }
+    const firstListing = deferred<{ data: SessionInfo[] }>()
+    let listCalls = 0
+    internal.attempt!.client = {
+      session: {
+        list: async () => {
+          listCalls++
+          return listCalls === 1 ? firstListing.promise : { data: [updated] }
+        },
+        status: async () => ({ data: {} }),
+      },
+    }
+
+    const refreshing = session.listHistory("/workspace")
+    await Promise.resolve()
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.updated", properties: { sessionID: "other", info: updated } },
+    } as never)
+    firstListing.resolve({ data: [stale] })
+    const projected = await refreshing
+
+    equal(listCalls, 2)
+    equal(projected[0]?.title, "Updated by TUI")
+  })
+
+  it("retries History when the TUI creates a session in the same workspace", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const current = info("old", 2)
+    const created = info("created", 3)
+    const firstListing = deferred<{ data: SessionInfo[] }>()
+    let listCalls = 0
+    internal.attempt!.client = {
+      session: {
+        list: async () => {
+          listCalls++
+          return listCalls === 1 ? firstListing.promise : { data: [created, current] }
+        },
+        status: async () => ({ data: {} }),
+      },
+    }
+
+    const refreshing = session.listHistory("/workspace")
+    await Promise.resolve()
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.created", properties: { sessionID: "created", info: created } },
+    } as never)
+    firstListing.resolve({ data: [current] })
+    const projected = await refreshing
+
+    equal(listCalls, 2)
+    deepEqual(projected.map((item) => item.title), ["created", "old"])
+  })
+
+  it("retries History when the TUI deletes another session in the same workspace", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    const current = info("old", 2)
+    const deleted = info("other", 1)
+    const firstListing = deferred<{ data: SessionInfo[] }>()
+    let listCalls = 0
+    internal.attempt!.client = {
+      session: {
+        list: async () => {
+          listCalls++
+          return listCalls === 1 ? firstListing.promise : { data: [current] }
+        },
+        status: async () => ({ data: {} }),
+      },
+    }
+
+    const refreshing = session.listHistory("/workspace")
+    await Promise.resolve()
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.deleted", properties: { sessionID: "other", info: deleted } },
+    } as never)
+    firstListing.resolve({ data: [current, deleted] })
+    const projected = await refreshing
+
+    equal(listCalls, 2)
+    deepEqual(projected.map((item) => item.title), ["old"])
   })
 
   it("renames only an allowlisted workspace session after backend success", async () => {
@@ -772,7 +923,7 @@ describe("official usage event projection", () => {
       },
     } as never))
     internal.applyEvent(internal.attempt!, {
-      payload: { type: "session.updated", properties: { info: {
+      payload: { type: "session.updated", properties: { sessionID: "old", info: {
         ...info("old", 2),
         cost: 0.04,
         tokens: { input: 30, output: 4, reasoning: 1, cache: { read: 8, write: 1 } },
@@ -1350,7 +1501,7 @@ describe("native slash session mutations", () => {
     })
     internal.applyEvent(internal.attempt!, {
       payload: {
-        type: "session.updated", properties: {
+        type: "session.updated", properties: { sessionID: "old",
           info: { ...info("old", 2), revert: { messageID: "user-2" }, cost: 2 },
         },
       },
@@ -1364,7 +1515,7 @@ describe("native slash session mutations", () => {
 
     marker = undefined
     internal.applyEvent(internal.attempt!, {
-      payload: { type: "session.updated", properties: { info: { ...info("old", 3), cost: 3 } } },
+      payload: { type: "session.updated", properties: { sessionID: "old", info: { ...info("old", 3), cost: 3 } } },
     } as never)
     await internal.attempt!.boundarySync
     equal(session.hasUndoneTurns(), false)
@@ -1403,7 +1554,7 @@ describe("native slash session mutations", () => {
     internal.applyEvent(internal.attempt!, {
       payload: {
         type: "session.updated",
-        properties: { info: { ...info("old", 2), revert: { messageID: "user-2" } } },
+        properties: { sessionID: "old", info: { ...info("old", 2), revert: { messageID: "user-2" } } },
       },
     } as never)
     equal(loads, 0)
@@ -1442,7 +1593,7 @@ describe("native slash session mutations", () => {
     internal.applyEvent(internal.attempt!, {
       payload: {
         type: "session.updated",
-        properties: { info: { ...info("old", 10), revert: { messageID: "user-2" } } },
+        properties: { sessionID: "old", info: { ...info("old", 10), revert: { messageID: "user-2" } } },
       },
     } as never)
     equal(session.snapshot().phase, "syncing")
@@ -1516,7 +1667,7 @@ describe("native slash session mutations", () => {
           marker = input.messageID
           const updated = current()
           internal.applyEvent(internal.attempt!, {
-            payload: { type: "session.updated", properties: { info: updated } },
+            payload: { type: "session.updated", properties: { sessionID: "old", info: updated } },
           } as never)
           return { data: updated }
         },
