@@ -18,6 +18,7 @@ import {
   parseWebviewMessage,
   type ActionMessage,
   type AttachmentAction,
+  type AttachmentUploadMessage,
   type ComposerMessage,
   type HistoryMessage,
   type HistorySession,
@@ -426,8 +427,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       )
       if (confirmed !== "Delete") return
       if (this.historySessions.find((session) => session.key === message.key)?.current) {
-        this.attachmentGeneration++
-        this.attachments?.clear()
+        this.advanceAttachmentContext(true)
       }
       if (await this.session.deleteSession(message.key)) await this.loadHistory(folder, false)
       else await this.historyError("OpenCode could not delete that chat. No history was changed.")
@@ -439,14 +439,43 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       return
     }
     if (message.type === "uploadFile") {
-      if (attachmentBusy(this.session.snapshot().phase)) return
+      if (message.context !== this.attachmentContext) {
+        await this.rejectAttachmentUpload(message, "The OpenCode chat changed before that attachment could be added.")
+        return
+      }
+      if (attachmentBusy(this.session.snapshot().phase)) {
+        await this.rejectAttachmentUpload(message, "Wait for the current OpenCode operation before adding an attachment.")
+        return
+      }
+      const store = this.attachmentStore(folder)
+      if (message.context !== this.attachmentContext) {
+        await this.rejectAttachmentUpload(message, "The OpenCode chat changed before that attachment could be added.")
+        return
+      }
       const generation = this.attachmentGeneration
       try {
-        await this.attachmentStore(folder).addLocalUpload(message.name, message.mime, message.data)
-        if (generation !== this.attachmentGeneration) return
+        const attachment = await store.addLocalUpload(message.name, message.mime, message.data)
+        if (generation !== this.attachmentGeneration || message.context !== this.attachmentContext) {
+          store.remove(attachment.id)
+          await this.rejectAttachmentUpload(message, "The OpenCode chat changed before that attachment could be added.")
+          return
+        }
+        await this.postAttachmentUpload({
+          type: "attachmentUpload",
+          requestID: message.requestID,
+          context: message.context,
+          status: "accepted",
+          attachment,
+        })
         await this.postState()
       } catch (error) {
-        this.session.reportError(attachmentError(error))
+        const messageText = safeAttachmentUploadError(generation === this.attachmentGeneration && message.context === this.attachmentContext
+          ? attachmentError(error)
+          : "The OpenCode chat changed before that attachment could be added.")
+        await this.rejectAttachmentUpload(message, messageText)
+        if (generation === this.attachmentGeneration && message.context === this.attachmentContext) {
+          this.session.reportError(messageText)
+        }
       }
       return
     }
@@ -519,6 +548,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       : await this.session.send(message.requestID, folder.uri.fsPath, message.text, files)
     if (sent) {
       store.removeMany(message.attachmentIDs)
+      this.advanceAttachmentContext(false)
       await this.postState()
     }
   }
@@ -527,11 +557,26 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     if (message.type === "sendPrompt" || message.type === "runCommand") {
       void this.postSubmission({ type: "submission", requestID: message.requestID, status: "rejected", error })
     }
+    if (message.type === "uploadFile") void this.rejectAttachmentUpload(message, error)
     this.session.reportError(error)
   }
 
   private postSubmission(message: SubmissionMessage) {
     return this.view?.webview.postMessage(message)
+  }
+
+  private postAttachmentUpload(message: AttachmentUploadMessage) {
+    return this.view?.webview.postMessage(message)
+  }
+
+  private rejectAttachmentUpload(message: Extract<WebviewMessage, { type: "uploadFile" }>, error: string) {
+    return this.postAttachmentUpload({
+      type: "attachmentUpload",
+      requestID: message.requestID,
+      context: message.context,
+      status: "rejected",
+      error: safeAttachmentUploadError(error),
+    })
   }
 
   private postAction(message: ActionMessage) {
@@ -565,6 +610,7 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
     const id = ++this.delivery
     if (!this.deliveryStarted) this.deliveryStarted = { id, time: performance.now() }
     const snapshot = this.session.snapshot()
+    const attachmentStore = folder ? this.attachmentStore(folder) : undefined
     const state = {
       phase: snapshot.phase,
       messages: snapshot.messages,
@@ -583,10 +629,11 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         pdf: model.pdf === true,
       })),
       selection: snapshot.selection,
+      attachmentContext: this.attachmentContext,
       error: snapshot.error,
       workspace: !!folder,
       trusted: workspace.isTrusted,
-      attachments: folder ? this.attachmentStore(folder).snapshot() : [],
+      attachments: attachmentStore?.snapshot() ?? [],
       reviews: snapshot.reviews,
       permissions: snapshot.permissions,
       questions: snapshot.questions,
@@ -1056,13 +1103,11 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
         return
       }
       if (action === "undo" && restoredPrompt !== undefined) {
-        this.attachmentGeneration++
-        this.attachments?.clear()
+        this.advanceAttachmentContext(true)
         await this.postComposer({ type: "composer", text: restoredPrompt })
       }
       if (action === "redo" && !this.session.hasUndoneTurns()) {
-        this.attachmentGeneration++
-        this.attachments?.clear()
+        this.advanceAttachmentContext(true)
         await this.postComposer({ type: "composer", text: "" })
       }
     } catch {
@@ -1099,10 +1144,9 @@ export class SidebarProvider implements WebviewViewProvider, Disposable {
       this.session.reportError("OpenCode could not fork this chat from that message.")
       return
     }
-    this.attachmentGeneration++
-    this.attachments?.clear()
+    this.advanceAttachmentContext(true)
     this.historyRequests.invalidate()
-    await this.loadHistory(folder, false)
+    await this.loadHistory(folder, false, this.historyVisible)
     if (selected.text !== undefined) await this.postComposer({ type: "composer", text: selected.text })
   }
 
@@ -1196,6 +1240,15 @@ function attachmentError(error: unknown) {
   return error instanceof AttachmentError ? error.message : "OpenCode could not add that context attachment."
 }
 
+function safeAttachmentUploadError(value: string) {
+  const sanitized = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1_000)
+  return sanitized || "OpenCode could not add that context attachment."
+}
+
 function createAttachmentContext() {
   return randomBytes(18).toString("base64url")
 }
@@ -1244,7 +1297,7 @@ function html(webview: Webview, script: Uri, language: string) {
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src blob:; connect-src 'none'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
     <style nonce="${nonce}">
       :root {
         color-scheme: light dark;
@@ -1487,11 +1540,18 @@ function html(webview: Webview, script: Uri, language: string) {
       @keyframes opencode-progress { from { transform: translateX(0); opacity: 0.55; } to { transform: translateX(145%); opacity: 1; } }
       textarea { width: 100%; min-height: 38px; max-height: 144px; resize: none; overflow-y: auto; padding: 1px 3px 7px; border: 0; outline: 0; color: var(--vscode-input-foreground); background: transparent; line-height: 1.45; }
       textarea::placeholder { color: var(--vscode-input-placeholderForeground); }
-      .attachment-strip { display: flex; flex-wrap: wrap; gap: 4px; max-height: 58px; overflow-y: auto; margin: 0 2px 6px; }
+      .attachment-strip { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; max-height: 92px; overflow-y: auto; margin: 0 2px 6px; }
       .attachment-chip { max-width: 100%; display: inline-flex; align-items: center; gap: 3px; height: 22px; padding-inline-start: 7px; border: 1px solid var(--opencode-accent-border); border-radius: 11px; color: var(--vscode-descriptionForeground); background: var(--vscode-editor-background); font-size: 10px; }
       .attachment-chip bdi { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate; }
+      .attachment-image { position: relative; width: 72px; height: 72px; flex: 0 0 72px; overflow: hidden; border: 1px solid var(--opencode-accent-border); border-radius: 9px; color: var(--vscode-descriptionForeground); background: var(--vscode-editor-background); }
+      .attachment-thumbnail { width: 100%; height: 100%; display: block; object-fit: cover; }
+      .attachment-image-placeholder { width: 100%; height: 100%; display: grid; place-items: center; font-size: 22px; }
+      .attachment-image-label { position: absolute; inset-inline: 0; inset-block-end: 0; overflow: hidden; padding: 11px 5px 3px; color: var(--vscode-editor-foreground); background: linear-gradient(transparent, color-mix(in srgb, var(--vscode-editor-background) 88%, transparent)); font-size: 9px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; unicode-bidi: isolate; }
+      .attachment-image .attachment-remove { position: absolute; z-index: 1; inset-block-start: 3px; inset-inline-end: 3px; color: var(--vscode-foreground); background: color-mix(in srgb, var(--vscode-editor-background) 82%, transparent); box-shadow: 0 1px 3px var(--vscode-widget-shadow); }
+      .attachment-chip.pending, .attachment-image.pending { opacity: .72; }
       .attachment-remove { width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; color: inherit; background: transparent; cursor: pointer; }
-      .attachment-remove:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+      .attachment-remove:hover:not(:disabled) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+      .attachment-remove:disabled { cursor: default; opacity: .55; }
       .attachment-control { position: relative; }
       #add-context { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 5px; color: var(--vscode-descriptionForeground); background: transparent; cursor: pointer; font-size: 19px; }
       #add-context:hover, #add-context[aria-expanded="true"] { color: var(--opencode-accent); background: var(--vscode-toolbar-hoverBackground); }

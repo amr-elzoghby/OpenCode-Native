@@ -56,12 +56,7 @@ export class AttachmentStore {
   }
 
   snapshot(): AttachmentChip[] {
-    return [...this.attachments.values()].map((item) => ({
-      id: item.id,
-      kind: item.kind,
-      label: item.label,
-      range: item.range,
-    }))
+    return [...this.attachments.values()].map(projectAttachment)
   }
 
   async addFiles(paths: string[]) {
@@ -109,7 +104,9 @@ export class AttachmentStore {
   async addLocalUpload(name: string, requestedMime: string, data: string) {
     const generation = this.generation
     return this.serialize(async () => {
-      if (generation !== this.generation) return this.snapshot()
+      if (generation !== this.generation) {
+        throw new AttachmentError("The attachment context changed before that file could be added.")
+      }
       if (this.attachments.size >= MAX_ATTACHMENTS) {
         throw new AttachmentError(`OpenCode supports up to ${MAX_ATTACHMENTS} context attachments.`)
       }
@@ -134,9 +131,11 @@ export class AttachmentStore {
         bytes: content.byteLength,
       }
       this.requireCapacity([record])
-      if (generation !== this.generation) return this.snapshot()
+      if (generation !== this.generation) {
+        throw new AttachmentError("The attachment context changed before that file could be added.")
+      }
       this.attachments.set(id, record)
-      return this.snapshot()
+      return projectAttachment(record)
     })
   }
 
@@ -316,6 +315,15 @@ export class AttachmentStore {
     const pending = this.mutation.then(operation)
     this.mutation = pending.then(() => undefined, () => undefined)
     return pending
+  }
+}
+
+function projectAttachment(item: AttachmentRecord): AttachmentChip {
+  return {
+    id: item.id,
+    kind: item.kind,
+    label: item.label,
+    range: item.range,
   }
 }
 

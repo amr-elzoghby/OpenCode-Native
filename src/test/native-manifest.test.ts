@@ -169,13 +169,63 @@ describe("Native command wiring", () => {
     const sidebar = readFileSync(join(root, "src", "sidebar.ts"), "utf8")
     const transcript = readFileSync(join(root, "src", "webview-transcript.ts"), "utf8")
     const webview = readFileSync(join(root, "src", "webview.ts"), "utf8")
+    const policy = sidebar.match(/Content-Security-Policy\" content=\"([^\"]+)/)?.[1]
     equal(sidebar.includes("default-src 'none'"), true)
     equal(sidebar.includes("connect-src 'none'"), true)
+    equal(policy?.match(/(?:^|; )img-src ([^;]+)/)?.[1], "blob:")
+    equal(policy?.includes("data:"), false)
+    equal(policy?.includes("http:"), false)
+    equal(policy?.includes("https:"), false)
     equal(sidebar.includes("unsafe-inline"), false)
     equal(transcript.includes('token.type === "html"'), true)
     equal(transcript.includes("document.createTextNode(token.raw)"), true)
     equal(`${transcript}${webview}`.includes("innerHTML"), false)
     equal(`${transcript}${webview}`.includes("fetch("), false)
+  })
+
+  it("keeps pasted-image previews bounded, local, correlated, and disposable", () => {
+    const attachments = readFileSync(join(root, "src", "webview-attachments.ts"), "utf8")
+    const webview = readFileSync(join(root, "src", "webview.ts"), "utf8")
+    const source = `${attachments}\n${webview}`
+    const drop = attachments.slice(attachments.indexOf("handleDrop(event:"), attachments.indexOf("    ids()"))
+    const prepare = attachments.slice(attachments.indexOf("async function prepareUpload"), attachments.indexOf("  function queueThumbnail"))
+
+    equal(source.includes("navigator.clipboard"), false)
+    equal(source.includes("innerHTML"), false)
+    equal(source.includes("data:image"), false)
+    equal(source.includes("http://"), false)
+    equal(source.includes("https://"), false)
+    equal(attachments.includes("URL.createObjectURL(thumbnail)"), true)
+    equal(attachments.includes("URL.revokeObjectURL(url)"), true)
+    equal(attachments.includes('canvas.toBlob(resolve, "image/png")'), true)
+    equal(attachments.includes("MAX_PREVIEW_DIMENSION = 160"), true)
+    equal(attachments.includes("MAX_SOURCE_DIMENSION = 8_192"), true)
+    equal(attachments.includes("MAX_SOURCE_PIXELS = 20_000_000"), true)
+    equal(attachments.includes("MAX_PREVIEW_BYTES = 256 * 1024"), true)
+    equal(attachments.includes("MAX_IMAGE_BYTES = 5 * 1024 * 1024"), true)
+    equal(attachments.includes("MAX_IMAGE_TOTAL_BYTES = 10 * 1024 * 1024"), true)
+    equal(attachments.includes("MAX_IMAGES = 4"), true)
+    equal(attachments.includes('mime === "application/octet-stream"'), true)
+    equal(attachments.match(/files[.]filter[(]rasterCandidate[)]/g)?.length, 2)
+    equal(prepare.indexOf("pending.get(entry.requestID) !== entry") < prepare.indexOf("previewImageInfo(encoded.bytes)"), true)
+    equal(prepare.includes("encoded.bytes.byteLength > MAX_IMAGE_BYTES"), true)
+    equal(prepare.includes("otherImages >= MAX_IMAGES"), true)
+    equal(prepare.includes("otherImageBytes + encoded.bytes.byteLength > MAX_IMAGE_TOTAL_BYTES"), true)
+    equal(attachments.includes("return operation.then(() => result, () => undefined)"), true)
+    equal(attachments.includes("message.context !== context"), true)
+    equal(attachments.includes("entry.context !== message.context"), true)
+    equal(attachments.includes("if (nextContext !== context)"), true)
+    equal(attachments.match(/clearTransientState[(][)]/g)?.length, 3)
+    equal(attachments.includes('image.src = previewURL'), true)
+    equal(attachments.includes('image.draggable = false'), true)
+    equal(webview.includes('prompt.addEventListener("paste"'), true)
+    equal(webview.includes('composer.addEventListener("dragover"'), true)
+    equal(webview.includes('composer.addEventListener("drop"'), true)
+    equal(attachments.includes('Array.from(event.dataTransfer.types).includes("Files")'), true)
+    equal(drop.indexOf("if (!files.length) return false") < drop.indexOf("event.preventDefault()"), true)
+    equal(webview.includes('window.addEventListener("beforeunload", () => attachments.dispose()'), true)
+    equal(webview.match(/attachments[.]isUploading[(][)]/g)?.length, 3)
+    equal(manifest.contributes.keybindings.some((binding) => /(?:ctrl|cmd)[+]v/i.test(binding.key)), false)
   })
 
   it("keeps blocking History and context menus keyboard-contained", () => {
@@ -225,7 +275,7 @@ describe("Native command wiring", () => {
     equal(webview.includes('vscode.postMessage({ type: "composer"'), false)
   })
 
-  it("adds workspace files through the supported Explorer context menu only", () => {
+  it("adds workspace files through Explorer and keeps file drops scoped to the composer", () => {
     deepEqual(manifest.contributes.menus["explorer/context"], [{
       command: "opencode.native.addExplorerFiles",
       when: "resourceScheme == file && !explorerResourceIsFolder",
@@ -233,8 +283,10 @@ describe("Native command wiring", () => {
     }])
     equal(manifest.contributes.commands.some((command) => command.command === "opencode.native.addExplorerFiles"), true)
     const webview = readFileSync(join(root, "src", "webview.ts"), "utf8")
-    equal(webview.includes('addEventListener("drop"'), false)
-    equal(webview.includes("DataTransfer"), false)
+    equal(webview.includes('composer.addEventListener("dragover"'), true)
+    equal(webview.includes('composer.addEventListener("drop"'), true)
+    equal(webview.includes('window.addEventListener("drop"'), false)
+    equal(webview.includes('document.addEventListener("drop"'), false)
   })
 
   it("keeps native review contents in the Extension Host", () => {

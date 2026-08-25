@@ -15,7 +15,7 @@ Use OpenCode from a native VS Code sidebar while keeping the OpenCode CLI, provi
 - Current-chat token total, plus expandable model, agent, timing, cost, and per-turn token details.
 - The three most recently updated workspace chats on the empty screen, plus searchable session history with rename, delete, refresh, fork, undo/redo, rolled-back message restore, and native diff review.
 - Provider sign-in through `/connect`, including subscription/OAuth and API-key methods exposed by OpenCode.
-- Workspace context plus local text, PDF, image, audio, and video attachments.
+- Workspace context plus local text, PDF, image, audio, and video attachments, with direct text/image paste and local image previews in the composer.
 - Searchable slash commands, current OpenCode commands and skills, MCP controls, and RTL-aware rendering.
 - Approval UI only when OpenCode emits a real pending permission request.
 

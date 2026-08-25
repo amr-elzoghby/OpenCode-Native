@@ -121,6 +121,7 @@ export type ViewState = {
     pdf: boolean
   }>
   selection: { agent?: string; model?: { providerID: string; modelID: string }; variant?: string }
+  attachmentContext: string
   attachments: AttachmentChip[]
   reviews: Array<{
     key: string
@@ -188,6 +189,9 @@ export type StateMessage = { type: "state"; id: number; state: ViewState }
 export type ActionMessage = { type: "action"; action: NativeAction }
 export type UsageMessage = { type: "usage"; action: "open" }
 export type ComposerMessage = { type: "composer"; text: string }
+export type AttachmentUploadMessage =
+  | { type: "attachmentUpload"; requestID: string; context: string; status: "accepted"; attachment: AttachmentChip }
+  | { type: "attachmentUpload"; requestID: string; context: string; status: "rejected"; error: string }
 export type RollbackResultMessage = {
   type: "rollbackResult"
   key: string
@@ -243,7 +247,7 @@ export type WebviewMessage =
   | { type: "deleteSession"; key: string }
   | { type: "restoreRolledBack"; key: string }
   | { type: "attachmentAction"; action: AttachmentAction }
-  | { type: "uploadFile"; name: string; mime: string; data: string }
+  | { type: "uploadFile"; requestID: string; context: string; name: string; mime: string; data: string }
   | { type: "removeAttachment"; id: string }
   | { type: "openReview"; reviewKey: string; fileKey: string }
   | { type: "replyPermission"; key: string; decision: "allow" | "deny" }
@@ -381,7 +385,9 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
   ) return { type: "attachmentAction", action: item.action as AttachmentAction }
   if (
     item.type === "uploadFile" &&
-    exactKeys(item, ["type", "name", "mime", "data"]) &&
+    exactKeys(item, ["type", "requestID", "context", "name", "mime", "data"]) &&
+    validRequestID(item.requestID) &&
+    validOpaqueKey(item.context) &&
     safeString(item.name, 240) &&
     safeString(item.mime, 100) &&
     typeof item.data === "string" &&
@@ -389,7 +395,14 @@ export function parseWebviewMessage(value: unknown): WebviewMessage | undefined 
     item.data.length <= MAX_LOCAL_FILE_BASE64_CHARS &&
     item.data.length % 4 === 0 &&
     /^[A-Za-z0-9+/]+={0,2}$/.test(item.data)
-  ) return { type: "uploadFile", name: item.name, mime: item.mime, data: item.data }
+  ) return {
+    type: "uploadFile",
+    requestID: item.requestID,
+    context: item.context,
+    name: item.name,
+    mime: item.mime,
+    data: item.data,
+  }
   if (item.type === "removeAttachment" && exactKeys(item, ["type", "id"]) && validOpaqueKey(item.id)) {
     return { type: "removeAttachment", id: item.id }
   }
@@ -564,12 +577,39 @@ export function parseSubmissionMessage(value: unknown): SubmissionMessage | unde
   return { type: "submission", requestID: item.requestID, status: item.status }
 }
 
+export function parseAttachmentUploadMessage(value: unknown): AttachmentUploadMessage | undefined {
+  const item = record(value)
+  if (!item || item.type !== "attachmentUpload" || !validRequestID(item.requestID) || !validOpaqueKey(item.context)) return
+  if (
+    item.status === "accepted" &&
+    exactKeys(item, ["type", "requestID", "context", "status", "attachment"]) &&
+    isAttachment(item.attachment)
+  ) return {
+    type: "attachmentUpload",
+    requestID: item.requestID,
+    context: item.context,
+    status: "accepted",
+    attachment: item.attachment,
+  }
+  if (
+    item.status === "rejected" &&
+    exactKeys(item, ["type", "requestID", "context", "status", "error"]) &&
+    safeDisplayError(item.error)
+  ) return {
+    type: "attachmentUpload",
+    requestID: item.requestID,
+    context: item.context,
+    status: "rejected",
+    error: item.error,
+  }
+}
+
 export function parseStateMessage(value: unknown): StateMessage | undefined {
   const item = record(value)
   if (!item || item.type !== "state" || !Number.isSafeInteger(item.id) || Number(item.id) <= 0) return
   const state = record(item.state)
   if (!state || !validPhase(state) || typeof state.trusted !== "boolean" || typeof state.workspace !== "boolean") return
-  const stateKeys = ["phase", "messages", "commands", "agents", "providers", "models", "selection", "attachments", "reviews", "permissions", "questions", "activities", "turnUsage", "sessionUsage", "workspace", "trusted"]
+  const stateKeys = ["phase", "messages", "commands", "agents", "providers", "models", "selection", "attachmentContext", "attachments", "reviews", "permissions", "questions", "activities", "turnUsage", "sessionUsage", "workspace", "trusted"]
   const stateKeysWithRollback = [...stateKeys, "rolledBack"]
   if (!(exactKeys(state, stateKeys) || exactKeys(state, [...stateKeys, "error"]) ||
     exactKeys(state, stateKeysWithRollback) || exactKeys(state, [...stateKeysWithRollback, "error"]))) return
@@ -579,6 +619,7 @@ export function parseStateMessage(value: unknown): StateMessage | undefined {
   if (!safeArray(state.agents, isAgent)) return
   if (!safeArray(state.providers, isProvider)) return
   if (!safeArray(state.models, isModel)) return
+  if (!validOpaqueKey(state.attachmentContext)) return
   if (!safeArray(state.attachments, isAttachment) || (state.attachments as unknown[]).length > MAX_ATTACHMENTS) return
   if (!safeArray(state.reviews, isReview) || (state.reviews as unknown[]).length > MAX_REVIEWS) return
   if ((state.reviews as ViewState["reviews"]).reduce((total, review) => total + review.files.length, 0) > MAX_REVIEW_TOTAL_FILES) return
@@ -613,6 +654,11 @@ function validRequestID(value: unknown): value is string {
 
 function validOpaqueKey(value: unknown): value is string {
   return typeof value === "string" && value.length >= 16 && value.length <= 128 && /^[A-Za-z0-9_-]+$/.test(value)
+}
+
+function safeDisplayError(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 1_000 &&
+    !/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u.test(value)
 }
 
 function isNativeAction(value: unknown): value is NativeAction {

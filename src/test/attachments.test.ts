@@ -99,6 +99,30 @@ describe("host-owned attachments", () => {
     equal(JSON.stringify(store.snapshot()).includes("Users"), false)
   })
 
+  it("returns only the newly accepted opaque chip from a local upload", async () => {
+    const store = new AttachmentStore(directory)
+    const content = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3,
+    ])
+    const chip = await store.addLocalUpload(
+      "C:\\Users\\amr\\Screenshot.png",
+      "image/svg+xml",
+      content.toString("base64"),
+    )
+
+    deepEqual(chip, store.snapshot()[0])
+    deepEqual(Object.keys(chip).sort(), ["id", "kind", "label", "range"])
+    deepEqual({ ...chip, id: "opaque" }, {
+      id: "opaque",
+      kind: "image",
+      label: "Screenshot.png",
+      range: undefined,
+    })
+    equal(JSON.stringify(chip).includes("Users"), false)
+    equal(JSON.stringify(chip).includes(content.toString("base64")), false)
+    equal(JSON.stringify(chip).includes("image/svg+xml"), false)
+  })
+
   it("rejects forged and unsupported local uploads", async () => {
     const store = new AttachmentStore(directory)
     await rejects(store.addLocalUpload("bad.bin", "application/octet-stream", "not base64"), /payload is invalid/)

@@ -8,6 +8,7 @@ import {
   MAX_TRANSCRIPT_TOTAL_CHARS,
   SubmissionTracker,
   parseActionMessage,
+  parseAttachmentUploadMessage,
   parseComposerMessage,
   parseHistoryMessage,
   parseProviderConnectMessage,
@@ -250,11 +251,46 @@ describe("Webview request protocol", () => {
   })
 
   it("accepts only bounded local file uploads", () => {
-    const upload = { type: "uploadFile", name: "clip.mp4", mime: "video/mp4", data: "AAAAAGZ0eXA=" }
+    const requestID = "attachment_upload_request_123"
+    const context = "opaque_attachment_context_123"
+    const upload = {
+      type: "uploadFile",
+      requestID,
+      context,
+      name: "clip.mp4",
+      mime: "video/mp4",
+      data: "AAAAAGZ0eXA=",
+    }
     deepEqual(parseWebviewMessage(upload), upload)
     equal(parseWebviewMessage({ ...upload, data: "not base64" }), undefined)
     equal(parseWebviewMessage({ ...upload, name: "x".repeat(241) }), undefined)
+    equal(parseWebviewMessage({ ...upload, requestID: "bad request" }), undefined)
+    equal(parseWebviewMessage({ ...upload, context: "raw-session-id" }), undefined)
+    equal(parseWebviewMessage({
+      type: upload.type,
+      requestID: upload.requestID,
+      name: upload.name,
+      mime: upload.mime,
+      data: upload.data,
+    }), undefined)
     equal(parseWebviewMessage({ ...upload, command: "workbench.action.files.openFile" }), undefined)
+  })
+
+  it("accepts only exact correlated attachment-upload acknowledgements", () => {
+    const requestID = "attachment_upload_request_123"
+    const context = "opaque_attachment_context_123"
+    const attachment = { id: "opaque_attachment_key_123", kind: "image" as const, label: "screenshot.png" }
+    const accepted = { type: "attachmentUpload", requestID, context, status: "accepted", attachment } as const
+    const rejected = { type: "attachmentUpload", requestID, context, status: "rejected", error: "Upload failed." } as const
+
+    deepEqual(parseAttachmentUploadMessage(accepted), accepted)
+    deepEqual(parseAttachmentUploadMessage(rejected), rejected)
+    equal(parseAttachmentUploadMessage({ ...accepted, id: attachment.id }), undefined)
+    equal(parseAttachmentUploadMessage({ ...accepted, attachment: { ...attachment, data: "secret" } }), undefined)
+    equal(parseAttachmentUploadMessage({ ...accepted, context: "raw-session-id" }), undefined)
+    equal(parseAttachmentUploadMessage({ ...accepted, requestID: "bad request" }), undefined)
+    equal(parseAttachmentUploadMessage({ ...rejected, error: "" }), undefined)
+    equal(parseAttachmentUploadMessage({ ...rejected, attachment }), undefined)
   })
 
   it("accepts only opaque native-review selections and metadata", () => {
@@ -274,6 +310,7 @@ describe("Webview request protocol", () => {
       providers: [],
       models: [],
       selection: {},
+      attachmentContext: "opaque_attachment_context_123",
       attachments: [],
       reviews: [{
         key: reviewKey,
@@ -381,6 +418,7 @@ describe("Webview request protocol", () => {
           audio: true, image: true, video: true, pdf: true,
         }],
         selection: { agent: "build", model: { providerID: "openai", modelID: "gpt-safe" }, variant: "high" },
+        attachmentContext: "opaque_attachment_context_123",
         attachments: [{ id: "opaque_attachment_123", kind: "file", label: "src/a.ts" }],
         reviews: [],
         permissions: [],
@@ -394,7 +432,16 @@ describe("Webview request protocol", () => {
     })
     equal(message?.state.selection.model?.modelID, "gpt-safe")
     equal(message?.state.messages[0]?.turnID, "message-1")
+    equal(message?.state.attachmentContext, "opaque_attachment_context_123")
     deepEqual(message?.state.rolledBack, { count: 0, truncated: false, messages: [] })
+    const withoutAttachmentContext = { ...message!.state } as unknown as Record<string, unknown>
+    delete withoutAttachmentContext.attachmentContext
+    equal(parseStateMessage({ type: "state", id: 3, state: withoutAttachmentContext }), undefined)
+    equal(parseStateMessage({
+      type: "state",
+      id: 3,
+      state: { ...message?.state, attachmentContext: "raw-session-id" },
+    }), undefined)
     equal(parseStateMessage({
       type: "state",
       id: 3,
@@ -422,6 +469,7 @@ describe("Webview request protocol", () => {
       providers: [],
       models: [],
       selection: {},
+      attachmentContext: "opaque_attachment_context_123",
       attachments: [],
       reviews: [],
       permissions: [],
@@ -519,6 +567,7 @@ describe("Webview request protocol", () => {
         audio: false, image: false, video: false, pdf: false,
       }],
       selection: { agent: "build", model: { providerID: "openai", modelID: "gpt-safe" }, variant: "high" },
+      attachmentContext: "opaque_attachment_context_123",
       attachments: [],
       reviews: [],
       permissions: [],
@@ -576,6 +625,7 @@ describe("Webview request protocol", () => {
         providers: [],
         models: [],
         selection: {},
+        attachmentContext: "opaque_attachment_context_123",
         attachments: [],
         reviews: [],
         permissions: [],
@@ -600,6 +650,7 @@ describe("Webview request protocol", () => {
         providers: [],
         models: [],
         selection: {},
+        attachmentContext: "opaque_attachment_context_123",
         attachments: [],
         reviews: [],
         permissions: [],
@@ -654,6 +705,7 @@ describe("Webview request protocol", () => {
       providers: [],
       models: [],
       selection: {},
+      attachmentContext: "opaque_attachment_context_123",
       attachments: [],
       reviews: [],
       permissions: [],
@@ -709,6 +761,7 @@ describe("Webview request protocol", () => {
       providers: [],
       models: [],
       selection: {},
+      attachmentContext: "opaque_attachment_context_123",
       attachments: [{ id: "opaque_image_key_123", kind: "image", label: "pixel.png" }],
       reviews: [],
       permissions: [],

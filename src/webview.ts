@@ -10,7 +10,17 @@ import { createProviderConnect } from "./webview-connect"
 import { createRecentChats } from "./webview-recent-chats"
 import { createUsage } from "./webview-usage"
 import { createRollbackDock } from "./webview-rollback"
-import { parseActionMessage, parseComposerMessage, parseRollbackResultMessage, parseStateMessage, parseSubmissionMessage, parseUsageMessage, type NativeAction, type ViewState } from "./protocol"
+import {
+  parseActionMessage,
+  parseAttachmentUploadMessage,
+  parseComposerMessage,
+  parseRollbackResultMessage,
+  parseStateMessage,
+  parseSubmissionMessage,
+  parseUsageMessage,
+  type NativeAction,
+  type ViewState,
+} from "./protocol"
 
 declare function acquireVsCodeApi(): { postMessage(message: unknown): void }
 
@@ -94,6 +104,7 @@ const attachments = createAttachments(
     announcer.textContent = message
   },
   (id) => vscode.postMessage({ type: "removeAttachment", id }),
+  () => syncSendDisabled(),
 )
 const permissions = createPermissions(permissionRoot, (key, decision) => {
   vscode.postMessage({ type: "replyPermission", key, decision })
@@ -128,7 +139,7 @@ composer.addEventListener("submit", (event) => {
   if (!current || current.phase === "loading" || current.phase === "stopping") return
   const text = prompt.value.trim()
   const attachmentIDs = attachments.ids()
-  if ((!text && !attachmentIDs.length) || text.length > prompt.maxLength || send.disabled) return
+  if ((!text && !attachmentIDs.length) || text.length > prompt.maxLength || send.disabled || attachments.isUploading()) return
   const requestID = crypto.randomUUID().replaceAll("-", "")
   pending = {
     requestID,
@@ -150,6 +161,15 @@ prompt.addEventListener("keydown", (event) => {
   event.preventDefault()
   composer.requestSubmit()
 })
+prompt.addEventListener("paste", (event) => {
+  attachments.handlePaste(event)
+})
+composer.addEventListener("dragover", (event) => {
+  attachments.handleDragOver(event)
+})
+composer.addEventListener("drop", (event) => {
+  attachments.handleDrop(event)
+})
 composer.addEventListener("focusin", () => vscode.postMessage({ type: "composerFocus", focused: true }))
 composer.addEventListener("focusout", (event) => {
   if (event.relatedTarget instanceof Node && composer.contains(event.relatedTarget)) return
@@ -166,6 +186,11 @@ window.addEventListener("message", (event) => {
   if (recentChats.apply(event.data)) return
   if (history.apply(event.data)) return
   if (providerConnect.apply(event.data)) return
+  const attachmentUpload = parseAttachmentUploadMessage(event.data)
+  if (attachmentUpload) {
+    attachments.handleUploadResult(attachmentUpload)
+    return
+  }
   const usageMessage = parseUsageMessage(event.data)
   if (usageMessage) {
     announcer.textContent = usage.open()
@@ -230,6 +255,7 @@ window.addEventListener("message", (event) => {
 
 vscode.postMessage({ type: "ready" })
 vscode.postMessage({ type: "sidebarFocus", focused: document.hasFocus() })
+window.addEventListener("beforeunload", () => attachments.dispose(), { once: true })
 
 function invokeAction(action: NativeAction) {
   vscode.postMessage({ type: "invokeAction", action })
@@ -237,7 +263,7 @@ function invokeAction(action: NativeAction) {
 
 function runDynamicCommand(key: string, name: string, argumentsValue: string) {
   if (pending && pending.status !== "rejected" && pending.status !== "observed") return
-  if (!current || current.phase !== "ready" || !current.selection.model) return
+  if (!current || current.phase !== "ready" || !current.selection.model || attachments.isUploading()) return
   if (!current.commands.some((command) => command.key === key && command.name === name)) return
   const attachmentIDs = attachments.ids()
   const requestID = crypto.randomUUID().replaceAll("-", "")
@@ -302,11 +328,12 @@ function render(state: ViewState) {
     state.attachments,
     backendUnavailable || generating || state.phase === "syncing",
     !!selectedModel,
+    state.attachmentContext,
   )
   permissions.update(state.permissions)
   questions.update(state.questions)
   rollback.update(state.rolledBack, controlsDisabled)
-  send.disabled = backendUnavailable || state.phase === "starting" || state.phase === "syncing" || state.phase === "stopping" || (!generating && !state.selection.model)
+  syncSendDisabled()
   send.classList.toggle("stop", generating)
   send.textContent = generating ? "■" : "↑"
   send.type = generating ? "button" : "submit"
@@ -363,6 +390,17 @@ function render(state: ViewState) {
     models: state.models,
     turnUsage: state.turnUsage,
   })
+}
+
+function syncSendDisabled() {
+  if (!current) {
+    send.disabled = true
+    return
+  }
+  const generating = current.phase === "loading" || current.phase === "stopping"
+  const backendUnavailable = !current.trusted || !current.workspace
+  send.disabled = backendUnavailable || current.phase === "starting" || current.phase === "syncing" ||
+    current.phase === "stopping" || (!generating && (!current.selection.model || attachments.isUploading()))
 }
 
 function cycleAgent(offset: number) {
