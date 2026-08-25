@@ -51,7 +51,7 @@ describe("Native command wiring", () => {
     deepEqual(manifest.extensionKind, ["workspace"])
   })
 
-  it("opens the current-chat token total from the view title instead of the composer", () => {
+  it("opens the detailed current-chat usage from the view title instead of the composer", () => {
     deepEqual(manifest.contributes.menus["view/title"], [
       { command: "opencode.native.history", when: "view == opencode.sidebar", group: "navigation@1" },
       { command: "opencode.native.refresh", when: "view == opencode.sidebar", group: "navigation@3" },
@@ -66,7 +66,12 @@ describe("Native command wiring", () => {
     equal(sidebar.indexOf('id="usage"') < sidebar.indexOf('class="transcript-shell"'), true)
     equal(sidebar.indexOf('id="usage"') < sidebar.indexOf('<form id="composer">'), true)
     equal(usage.includes("Calculated from OpenCode's input, output, reasoning, cache-read, and cache-write counters"), true)
-    equal(usage.includes('`${formatTokens(session.tokens?.total)} tokens`'), true)
+    equal(usage.includes("const restore = !available && root.contains(document.activeElement)"), true)
+    equal(usage.indexOf("const restore =") < usage.indexOf("root.hidden = !available"), true)
+    equal(usage.includes('["Input", formatTokens(session.tokens?.input)]'), true)
+    equal(usage.includes('["Cache read", formatTokens(session.tokens?.cacheRead)]'), true)
+    equal(usage.includes('["Tokens", formatTokens(session.tokens?.total)]'), true)
+    equal(usage.includes("innerHTML"), false)
     equal(usage.includes("Model limit"), false)
     equal(usage.includes("Current context"), false)
     equal(usage.includes("formatPercent"), false)
