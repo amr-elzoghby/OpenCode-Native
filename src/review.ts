@@ -26,8 +26,16 @@ export type ReviewSummary = {
 export type FileDiff = {
   file?: string
   patch?: string
+  before?: string
+  after?: string
   additions: number
   deletions: number
+}
+
+export type ReviewDocument = {
+  path: string
+  before: string
+  after: string
 }
 
 type Message = {
@@ -38,7 +46,7 @@ type Message = {
 
 type ReviewRecord = ReviewSummary & {
   messageID: string
-  targets: Map<string, { kind: "diff"; path: string }>
+  targets: Map<string, { kind: "diff"; path: string; document?: ReviewDocument }>
 }
 
 export class ReviewStore {
@@ -64,6 +72,7 @@ export class ReviewStore {
     const existing = this.records.get(message.id)
     const previous = new Map(existing?.files.map((file) => [file.path, file]))
     const paths = new Set<string>()
+    const documents = new Map<string, ReviewDocument>()
     const touched = new Set((touchedPaths ?? []).slice(0, MAX_REVIEW_FILES).flatMap((value) => {
       const path = safePath(value)
       return path ? [path] : []
@@ -73,7 +82,9 @@ export class ReviewStore {
       if (!path || paths.has(path) || !safeCount(diff.additions) || !safeCount(diff.deletions)) return []
       paths.add(path)
       const toolTouched = touched.has(path)
-      const reviewable = !patchesAuthoritative || reviewDocument(diff, path) !== undefined
+      const document = reviewDocument(diff, path)
+      if (document) documents.set(path, document)
+      const reviewable = !patchesAuthoritative || document !== undefined
       return [{
         key: previous.get(path)?.key ?? this.createKey(),
         path,
@@ -109,7 +120,7 @@ export class ReviewStore {
       attribution: kinds.size > 1 ? "mixed" : kinds.has("direct") ? "direct" : "observed",
       files,
       targets: new Map(files.flatMap((file) => file.reviewable
-        ? [[file.key, { kind: "diff" as const, path: file.path }] as const]
+        ? [[file.key, { kind: "diff" as const, path: file.path, document: documents.get(file.path) }] as const]
         : [])),
     })
     while (this.records.size > MAX_REVIEW_TURNS) this.records.delete(this.records.keys().next().value!)
@@ -137,11 +148,21 @@ export class ReviewStore {
 
 }
 
-export function reviewDocument(diff: FileDiff, expectedPath: string) {
-  if (safePath(diff.file) !== expectedPath || typeof diff.patch !== "string") return
+export function reviewDocument(diff: FileDiff, expectedPath: string): ReviewDocument | undefined {
+  if (safePath(diff.file) !== expectedPath) return
+  if (typeof diff.before === "string" || typeof diff.after === "string") {
+    if (typeof diff.before !== "string" || typeof diff.after !== "string") return
+    if (!safeDocument(diff.before) || !safeDocument(diff.after)) return
+    return { path: expectedPath, before: diff.before, after: diff.after }
+  }
+  if (typeof diff.patch !== "string") return
   const contents = fullPatchContents(diff.patch)
   if (!contents || contents.before.length > MAX_REVIEW_DOCUMENT_CHARS || contents.after.length > MAX_REVIEW_DOCUMENT_CHARS) return
   return { path: expectedPath, ...contents }
+}
+
+function safeDocument(value: string) {
+  return value.length <= MAX_REVIEW_DOCUMENT_CHARS && !value.includes("\0")
 }
 
 function fullPatchContents(patch: string) {

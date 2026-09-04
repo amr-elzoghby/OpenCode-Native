@@ -229,10 +229,13 @@ export class SessionController {
       this.transcript.resolveReview(reviewKey, fileKey)?.path !== target.path
     ) throw new Error("That file review changed before it could be opened.")
     const matches = (response.data ?? []).slice(0, MAX_REVIEW_FILES).filter((diff) => normalizedDiffPath(diff.file) === target.path)
-    if (matches.length !== 1) throw new Error("OpenCode could not provide that file revision.")
-    const document = reviewDocument(matches[0]!, target.path)
-    if (!document) throw new Error("OpenCode could not provide a safe text diff for that file.")
-    return document
+    if (matches.length > 1) throw new Error("OpenCode returned an ambiguous file revision.")
+    const document = matches.length === 1 ? reviewDocument(matches[0]!, target.path) : undefined
+    if (document) return document
+    const current = this.transcript.resolveReview(reviewKey, fileKey)
+    if (current?.messageID === target.messageID && current.path === target.path && current.document) return current.document
+    if (matches.length === 1) throw new Error("OpenCode could not provide a safe text diff for that file.")
+    throw new Error("OpenCode could not provide that file revision.")
   }
 
   async replyPermission(key: string, decision: "allow" | "deny") {
@@ -1771,7 +1774,6 @@ export class SessionController {
     messageID: string,
   ) {
     if (!attempt.client || transcript.role(messageID) !== "user") return
-    let receivedOfficialResponse = false
     let diffs: FileDiff[] = []
     for (const index of Array.from({ length: REVIEW_DIFF_ATTEMPTS }, (_, value) => value)) {
       if (!this.reviewIsCurrent(attempt, sessionID, generation, transcript)) return
@@ -1781,14 +1783,13 @@ export class SessionController {
       ).catch(() => undefined)
       if (!this.reviewIsCurrent(attempt, sessionID, generation, transcript)) return
       if (Array.isArray(response?.data)) {
-        receivedOfficialResponse = true
         diffs = response.data
         if (diffs.length) break
       }
       if (index < REVIEW_DIFF_ATTEMPTS - 1) await new Promise((resolve) => setTimeout(resolve, REVIEW_DIFF_RETRY_MS))
     }
     if (!this.reviewIsCurrent(attempt, sessionID, generation, transcript)) return
-    if (receivedOfficialResponse || !transcript.hasReview(messageID)) {
+    if (diffs.length || !transcript.hasReview(messageID)) {
       this.reviewEpoch++
       transcript.setReview(messageID, diffs, diffs.length === 0, true)
       this.flushRender()

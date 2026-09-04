@@ -1261,6 +1261,27 @@ describe("native review session isolation", () => {
     equal(session.snapshot().reviews[0]!.files[0]!.reviewable, true)
   })
 
+  it("opens a hydrated official snapshot when the legacy diff endpoint is empty", async () => {
+    const session = controller("old")
+    const internal = internals(session)
+    internal.transcript = reviewTranscript()
+    internal.loadTranscript = async () => internal.transcript
+    internal.attempt!.client = { session: { diff: async () => ({ data: [] }) } }
+
+    internal.applyEvent(internal.attempt!, {
+      payload: { type: "session.idle", properties: { sessionID: "old" } },
+    } as never)
+    await internal.attempt!.reconciling
+
+    const review = session.snapshot().reviews[0]!
+    equal(review.files[0]!.reviewable, true)
+    deepEqual(await session.review(review.key, review.files[0]!.key), {
+      path: "src/a.ts",
+      before: "old\n",
+      after: "new\n",
+    })
+  })
+
   it("does not surface a late diff after New Chat changes the generation", async () => {
     const session = controller("old")
     const internal = internals(session)
@@ -2328,7 +2349,8 @@ function reviewTranscript() {
           additions: 1,
           deletions: 1,
           status: "modified",
-          patch: "@@ -1,1 +1,1 @@\n-old\n+new\n",
+          before: "old\n",
+          after: "new\n",
         }],
       },
     },

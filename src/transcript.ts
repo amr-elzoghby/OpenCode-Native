@@ -78,6 +78,8 @@ type MessageInfo = {
     diffs: Array<{
       file?: string
       patch?: string
+      before?: string
+      after?: string
       additions: number
       deletions: number
       status?: "added" | "deleted" | "modified"

@@ -15,6 +15,7 @@ describe("native diff review boundary", () => {
       messageID: "message-review",
       kind: "diff",
       path: "src/session.ts",
+      document: { path: "src/session.ts", before: "old\n", after: "new\n" },
     })
   })
 
@@ -34,6 +35,7 @@ describe("native diff review boundary", () => {
       messageID: "message-review",
       kind: "diff",
       path: "src/a.ts",
+      document: { path: "src/a.ts", before: "old\n", after: "new\n" },
     })
     equal(store.resolve(review.key, review.files[2]!.key), undefined)
   })
@@ -86,6 +88,26 @@ describe("native diff review boundary", () => {
       1,
       "@@ -1,1 +1,1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n",
     ), "src/no-newline.ts"), { path: "src/no-newline.ts", before: "old", after: "new" })
+  })
+
+  it("accepts official before and after snapshots without exposing them in Webview state", () => {
+    const store = new ReviewStore(keyFactory())
+    store.upsert({
+      id: "message-review",
+      role: "user",
+      summary: { diffs: [{ file: "src/a.ts", additions: 1, deletions: 1, before: "old\n", after: "new\n" }] },
+    })
+    const review = store.snapshot()[0]!
+    equal(review.files[0]!.reviewable, true)
+    equal(JSON.stringify(review).includes("old"), false)
+    deepEqual(reviewDocument(
+      { file: "src/a.ts", additions: 1, deletions: 1, before: "old\n", after: "new\n" },
+      "src/a.ts",
+    ), { path: "src/a.ts", before: "old\n", after: "new\n" })
+    equal(reviewDocument(
+      { file: "src/a.ts", additions: 1, deletions: 1, before: "old\n" },
+      "src/a.ts",
+    ), undefined)
   })
 
   it("invalidates stale keys when the transcript is cleared", () => {
