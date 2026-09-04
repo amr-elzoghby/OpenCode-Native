@@ -110,7 +110,7 @@ Avoid writing to the same session from both clients at the same time.
 - After explicit selection, the Webview reads the device file and sends its basename, MIME hint, and bounded content to the Extension Host; the full local path is not sent. The host revalidates the payload, detects an allowed type, and checks size and model support before submission.
 - OpenCode agents may read or modify workspace files and run terminal commands according to OpenCode Core configuration and permissions.
 - Native does not decide which actions require approval. It shows only real pending requests from OpenCode Core and returns **Allow once** or **Deny**. Routine reads, searches, directory inspection, and informational commands remain silent whenever Core allows them; Native has no command-name risk engine.
-- Native Review uses OpenCode's official `session.diff` snapshot data and does not require custom file-change-record APIs. Agent edits can still finish when diff data is unavailable, but Review may be unavailable for that turn.
+- Native Review uses OpenCode's official full-file `before`/`after` snapshots from message summaries and `session.diff`; it keeps a validated host-side snapshot when older Core diff endpoints return no rows. Snapshot contents never enter Webview state. Agent edits can still finish when Core provides only a touched path, but Full File Diff is unavailable for that file.
 - Live cross-client sync and persistent **Always Allow** management are not included in this release.
 
 ## Development
